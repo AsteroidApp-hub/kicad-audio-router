@@ -194,7 +194,7 @@ def cmd_route(args) -> int:
     summary = {"saved": out, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
                "tracks": nt, "vias": nv,
                "layers": prm.layers or [l for l in board.copper_layers if l not in board.plane_layers],
-               "seconds": round(time.time() - t0, 1)}
+               "seconds": round(time.time() - t0, 1), "stats": res.stats}
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     return 0 if not res.failed else 2
 

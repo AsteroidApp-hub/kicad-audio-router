@@ -54,6 +54,7 @@ class RouteParams:
     rip_rounds: int = 3               # rip-up and reroute rounds for nets that failed
     fine_fallback: bool = True        # nets that still fail are tried again on a grid twice as fine
     phase: tuple[float, float] | None = None   # grid offset; default: aligned to most fine-pitch pads
+    window: tuple[float, float, float, float] | None = None   # route only inside this box (mm)
     max_expand: int = 400_000         # node budget per search (fail fast instead of flooding the board)
     near_targets: int = 6             # heuristic looks at this many nearest remaining pads
     rip_radius: float = 2.0           # routed nets passing this close to a failed net's pads are ripped up
@@ -61,6 +62,7 @@ class RouteParams:
     push_cost: float = 20.0           # per step through another net's track when pushing (digital/other)
     push_cost_analog: float = 60.0    # ... through an analog track
     push_limit: int = 4               # how many times one net may push others
+    push_total: int = 0               # pushes in all (0: 3 x the nets that failed, at least 20)
     local_rip: bool = False           # also try ripping up everything near a failed net's pads first
     h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 1.2, "other": 1.5,
                                                     "gnd": 1.5})
@@ -82,6 +84,7 @@ class RouteResult:
     routed: list[RoutedNet]
     failed: list[str]
     skipped: list[str]
+    stats: dict = field(default_factory=dict)      # seconds per phase, pushes, reroutes
 
 
 def _grid_phase(board: Board, res: float, nets=None) -> tuple[float, float]:
@@ -141,6 +144,10 @@ class Grid:
         self.res = prm.res
         xs = [x for poly in board.outline for x, _ in poly] or [p.x for fp in board.footprints for p in fp.pads]
         ys = [y for poly in board.outline for _, y in poly] or [p.y for fp in board.footprints for p in fp.pads]
+        if prm.window:
+            wx0, wy0, wx1, wy1 = prm.window
+            xs = [max(min(xs), wx0) + 1.0, min(max(xs), wx1) - 1.0]
+            ys = [max(min(ys), wy0) + 1.0, min(max(ys), wy1) - 1.0]
         rx, ry = prm.phase if prm.phase is not None else _grid_phase(board, self.res)
         self.ox = math.floor((min(xs) - 1.0 - rx) / self.res) * self.res + rx
         self.oy = math.floor((min(ys) - 1.0 - ry) / self.res) * self.res + ry
@@ -360,17 +367,30 @@ def _add_via(g: Grid, x: float, y: float, d: float, net: str, fixed: bool):
                       (x - d / 2, y - d / 2, x + d / 2, y + d / 2), fixed, obj)
 
 
+def _grid_box(g: Grid) -> tuple[float, float, float, float]:
+    r = g.reach + 1.0
+    x1, y1 = g.pos(g.W - 1, g.H - 1)
+    return (g.ox - r, g.oy - r, x1 + r, y1 + r)
+
+
+def _touches(b, w) -> bool:
+    return b[0] <= w[2] and b[2] >= w[0] and b[1] <= w[3] and b[3] >= w[1]
+
+
 def build_grid(board: Board, cls: Classification, prm: RouteParams, weights: dict) -> Grid:
     g = Grid(board, prm)
     g.ncl = board.net_clearance
     pads = [p for fp in board.footprints for p in fp.pads]
+    win = _grid_box(g)
     for p in pads:
-        _add_pad(g, p)
+        if _touches(p.box(), win):
+            _add_pad(g, p)
     for s in board.segs:
-        if s.layer in g.lidx:
+        if s.layer in g.lidx and _touches(s.bbox(s.width / 2), win):
             _add_seg(g, g.lidx[s.layer], s, True)
     for v in board.vias:
-        _add_via(g, v.x, v.y, v.diameter, v.net, True)
+        if _touches((v.x, v.y, v.x, v.y), win):
+            _add_via(g, v.x, v.y, v.diameter, v.net, True)
     for n, i in g.net_id.items():
         g.clr[i] = board.clearance(n, default=prm.clearance)
     g.clr[BLOCK] = board.clearance("", default=prm.clearance)     # pads without a net (holes)
@@ -793,14 +813,20 @@ def _path_to_segs(g: Grid, path, net: str, width: float) -> tuple[list[Seg], lis
     return segs, vias
 
 
-def _commit(g: Grid, net: str, kind: str, segs: list[Seg], vias, prm: RouteParams, fields: bool = True):
+def _commit(g: Grid, net: str, kind: str, segs: list[Seg], vias, prm: RouteParams, fields: bool = True,
+            fixed: bool = False):
+    win = _grid_box(g) if prm.window else None
     for s in segs:
+        if win and not _touches(s.bbox(s.width / 2), win):
+            continue
         li = g.lidx[s.layer]
-        _add_seg(g, li, s, False)
+        _add_seg(g, li, s, fixed)
         if kind == "analog" and fields:
             g.field_capsule(g.near_ana[li], s.x1, s.y1, s.x2, s.y2, prm.near_mm, 1.0)
     for x, y in vias:
-        _add_via(g, x, y, prm.via_d, net, False)
+        if win and not _touches((x, y, x, y), win):
+            continue
+        _add_via(g, x, y, prm.via_d, net, fixed)
     nid = g.nid(net)
     if nid not in g.clr:
         g.clr[nid] = max(prm.clearance, getattr(g, "ncl", {}).get(net, 0.0))
@@ -869,7 +895,7 @@ def _pair_band(g: Grid, segs: list[Seg], width: float, prm: RouteParams) -> list
 
 def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: RouteParams,
               pair_field=None, act_w: float = 1.0, push: dict[int, float] | None = None,
-              first_of_pair: bool = False) -> RoutedNet | None:
+              first_of_pair: bool = False, why: list | None = None) -> RoutedNet | None:
     """Grow a tree over the net's pads. `width` may be a list: each connection tries the widths in
     order (e.g. a power net goes narrow only where the wide track does not fit)."""
     widths = list(width) if isinstance(width, (list, tuple)) else [width]
@@ -908,6 +934,8 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         if push is None:
             reachable = lambda srch, k: any(srch.track_state(*c) is OK for c, kk in targets.items() if kk == k)
             if not all(any(reachable(srch, k) for srch in searches) for k in near_ids):
+                if why is not None:
+                    why.append("pin")       # no grid cell on a pin: a finer grid is needed, not pushing
                 return None
         for srch, w in zip(searches, widths):
             # start only where this track width keeps its clearance (a wide track starting at a pad's
@@ -970,6 +998,8 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
           progress=None, prerouted: dict | None = None) -> RouteResult:
     """Route `nets` (default: all of prm.classes). `prerouted` routes are laid down first as ordinary
     (pushable) tracks; with it, the result lists every route, rerouted ones included."""
+    import time as _time
+    t_start = _time.time()
     base = build_grid(board, cls, prm, weights)     # pads, existing copper, edges, fields (built once)
     g = base.clone()
     pads_by_net = board.pads_by_net()
@@ -990,9 +1020,19 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     failed, skipped = [], []
     done: dict[str, RoutedNet] = {}
     partner_of = {b: a for a, b in pairs}
+    pin_bound: set[str] = set()     # nets that failed because no grid cell sits on one of their pins
+    frozen: dict[str, RoutedNet] = {}
+    wbox = prm.window
     for n, rn in (prerouted or {}).items():
-        _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False)
-        done[n] = rn
+        inside = wbox is None or all(wbox[0] <= p.x <= wbox[2] and wbox[1] <= p.y <= wbox[3]
+                                     for p in pads_by_net.get(n, []))
+        if inside:
+            _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False)
+            done[n] = rn
+        else:
+            # reaches outside the window: kept as it is, cannot be pushed aside here
+            _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False, fixed=True)
+            frozen[n] = rn
 
     def attempt(g, net, partner, first_of_pair=False):
         kind = cls.kind.get(net, "other")
@@ -1001,8 +1041,11 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         if kind in prm.narrow_width:
             widths.append(prm.narrow_width[kind])
         pf = _pair_band(g, done[partner].segs, done[partner].width, prm) if partner in done else None
+        why: list = []
         res = route_net(g, pads, net, kind, widths, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0),
-                        first_of_pair=first_of_pair)
+                        first_of_pair=first_of_pair, why=why)
+        if why:
+            pin_bound.add(net)
         if res:
             _commit(g, net, kind, res.segs, res.vias, prm)
             done[net] = res
@@ -1047,6 +1090,47 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
                 done[n] = r
         return g1, res[a] is not None, res[b] is not None
 
+    # nets with a pin that no cell of this grid can reach (fine-pitch parts off the grid phase) go first,
+    # on a fine grid around their pads, before other tracks fill the space around those pins
+    early_stats: dict = {}
+    if prm.fine_fallback and prm.res > 0.15 and prerouted is None:
+        def pin_bound_net(n):
+            kind = cls.kind.get(n, "other")
+            w = min(prm.width.get(kind, 0.25), prm.narrow_width.get(kind, 9.0))   # narrowest it may use
+            srch = _Search(g, n, kind, w, prm, None, 1.0)
+            for p in pads_by_net.get(n, []):
+                if any(l in g.lidx for l in p.layers) and \
+                        not any(srch.track_state(*c) is OK for c in _pad_cells(g, p)):
+                    return True
+            return False
+        early = [n for n, _ in todo if pin_bound_net(n)]
+        if early:
+            import copy
+            t_e = _time.time()
+            bxs = [x for poly in board.outline for x, _ in poly]
+            bys = [y for poly in board.outline for _, y in poly]
+            if progress:
+                progress(f"fine grid first for {len(early)} pin-bound nets", True)
+            got: dict[str, RoutedNet] = {}
+            efail = []
+            for n in early:          # one net at a time, each in a small window around its own pads
+                pe = copy.copy(prm)
+                pe.res, pe.fine_fallback = prm.res / 2, False
+                pe.phase = _grid_phase(board, pe.res, {n})
+                ps = pads_by_net.get(n, [])
+                m = 5.0
+                pe.window = (max(min(p.x for p in ps) - m, min(bxs or [0])), max(min(p.y for p in ps) - m, min(bys or [0])),
+                             min(max(p.x for p in ps) + m, max(bxs or [1e9])), min(max(p.y for p in ps) + m, max(bys or [1e9])))
+                re_ = route(board, cls, pe, weights, nets=[n], progress=progress, prerouted=dict(got))
+                got = {rn.net: rn for rn in re_.routed}
+                efail += re_.failed
+            for rn in got.values():
+                _commit(g, rn.net, cls.kind.get(rn.net, "other"), rn.segs, rn.vias, prm)
+                done[rn.net] = rn
+            todo = [(n, pt) for n, pt in todo if n not in done]
+            early_stats = {"early_nets": len(early), "t_early": round(_time.time() - t_e, 1), "early_failed": efail}
+
+    todo_all = list(order)
     handled = set()
     for k, (net, partner) in enumerate(todo):
         if net in handled:
@@ -1069,6 +1153,8 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
 
     import time
     t_end = time.time() + prm.rip_time_s
+    stats = {"t_main": round(time.time() - t_start, 1), "failed_main": len(failed), "pushes": 0,
+             "rerouted": 0, **early_stats}
 
     def rebuild(keep: dict[str, RoutedNet]):
         # occupancy from scratch; the proximity fields keep ripped analog tracks (harmless, slightly cautious)
@@ -1120,14 +1206,18 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     pushes: dict[str, int] = {}
     queue = list(failed)
     failed = []
+    t_push = time.time()
+    total = prm.push_total or max(20, 3 * len(queue))
     while queue:
         net = queue.pop(0)
         if net in done:
             continue
-        if time.time() > t_end or pushes.get(net, 0) >= prm.push_limit:
+        if time.time() > t_end or pushes.get(net, 0) >= prm.push_limit or stats["pushes"] >= total \
+                or net in pin_bound:
             failed.append(net)
             continue
         pushes[net] = pushes.get(net, 0) + 1
+        stats["pushes"] += 1
         kind = cls.kind.get(net, "other")
         # pushing a net means re-routing it: big nets (many pads) are dearer, analog dearer still
         id_cost = {g.nid(n): (prm.push_cost_analog if cls.kind.get(n) == "analog" else prm.push_cost)
@@ -1150,8 +1240,12 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         _commit(g, net, kind, res.segs, res.vias, prm)
         if progress:
             progress(f"{net} (pushed {len(victims)}: {', '.join(victims[:4])})", True)
+        stats["rerouted"] += len(victims)
         queue += reroute(g, victims)
     failed = sorted(set(failed))
+    stats["t_push"] = round(time.time() - t_push, 1)
+    stats["failed_push"] = len(failed)
+    t_fine = time.time()
 
     # 3) finer grid for what is left (fine-pitch parts such as USB-C, SSOP), one net at a time with the
     #    grid aligned to its pads; the routes so far stay pushable so a walled-in pin can be freed
@@ -1161,10 +1255,19 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         p2.res, p2.fine_fallback, p2.rip_time_s = prm.res / 2, False, min(prm.rip_time_s, 120.0)
         if progress:
             progress(f"fine grid {p2.res} mm for {len(failed)} nets", True)
-        def attempt_fine(nets_, phase_nets, done_, failed_):
-            """Route `nets_` on the fine grid; keep the result only if fewer nets end up unrouted."""
+        bxs = [x for poly in board.outline for x, _ in poly]
+        bys = [y for poly in board.outline for _, y in poly]
+
+        def attempt_fine(nets_, phase_nets, done_, failed_, windowed=True):
+            """Route `nets_` on the fine grid, in a window around their pads; keep the result only if
+            fewer nets end up unrouted."""
             p3 = copy.copy(p2)
             p3.phase = _grid_phase(board, p2.res, set(phase_nets))
+            ps = [p for n in nets_ for p in pads_by_net.get(n, [])]
+            if windowed and ps and bxs:
+                m = 10.0
+                p3.window = (max(min(p.x for p in ps) - m, min(bxs)), max(min(p.y for p in ps) - m, min(bys)),
+                             min(max(p.x for p in ps) + m, max(bxs)), min(max(p.y for p in ps) + m, max(bys)))
             r = route(board, cls, p3, weights, nets=list(nets_), progress=progress, prerouted=dict(done_))
             new_done = {rn.net: rn for rn in r.routed}
             lost = [n for n in done_ if n not in new_done]        # pushed aside and not rerouted
@@ -1178,10 +1281,15 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         # ... then one at a time, each with the grid on its own pads
         for net in list(failed):
             done, failed = attempt_fine([net], [net], done, failed)
+        # ... and, for what is still left, on the whole board (long routes outside the window can move)
+        for net in list(failed):
+            done, failed = attempt_fine([net], [net], done, failed, windowed=False)
+    stats["t_fine"] = round(time.time() - t_fine, 1)
+    stats["t_total"] = round(time.time() - t_start, 1)
     if prerouted is not None:
-        return RouteResult(list(done.values()), failed, skipped)
-    routed = [done[n] for n, _ in todo if n in done]
-    return RouteResult(routed, failed, skipped)
+        return RouteResult(list(done.values()) + list(frozen.values()), failed, skipped, stats)
+    routed = [done[n] for n, _ in todo_all if n in done]
+    return RouteResult(routed, failed, skipped, stats)
 
 
 def escape_to_via(board: Board, cls: Classification, prm: RouteParams, weights: dict, net: str,
