@@ -32,8 +32,10 @@ class Report:
         L += [f"| nets (analog / digital / power / gnd / other) | {s['analog']} / {s['digital']} / {s['power']} / {s['gnd']} / {s['other']} |",
               f"| unrouted | {d['unrouted']} |",
               f"| analog track length | {s['analog_length_mm']:.0f} mm, {s['analog_vias']} vias |"]
-        for g, v in d["coupling"]["total_mm"].items():
-            L.append(f"| analog running within {g} mm of digital | {v:.1f} mm |")
+        c = d["coupling"]
+        for g, v in c["total_mm"].items():
+            parts = ", ".join(f"{a} {c['by_activity_mm'][a][g]:.0f}" for a in c["by_activity_mm"])
+            L.append(f"| analog running within {g} mm of digital | {v:.1f} mm (weighted {c['weighted_mm'][g]:.1f}; {parts}) |")
         p = d["pairs"]
         L += [f"| differential pairs | {len(p['items'])} (mismatch max {p['max_mismatch_mm']:.1f} mm, side-by-side {p['avg_parallel_pct']:.0f} %) |",
               f"| GND pads farther than {d['gnd']['limit_mm']} mm from a GND via | {len(d['gnd']['far'])} / {d['gnd']['pads']} |",
@@ -41,10 +43,10 @@ class Report:
         worst = d["coupling"]["worst"][:15]
         if worst:
             L += ["## Analog nets closest to digital", "",
-                  f"| analog net | within {d['coupling']['gaps'][0]} mm | within {d['coupling']['gaps'][-1]} mm | digital nets |",
+                  f"| analog net | within {d['coupling']['gaps'][0]} mm (weighted) | within {d['coupling']['gaps'][-1]} mm (weighted) | digital nets |",
                   "|---|---:|---:|---|"]
             for w in worst:
-                L.append(f"| {w['net']} | {w['near'][0]:.1f} | {w['near'][-1]:.1f} | {', '.join(w['aggressors'][:5])} |")
+                L.append(f"| {w['net']} | {w['near'][0]:.1f} ({w['weighted'][0]:.1f}) | {w['near'][-1]:.1f} ({w['weighted'][-1]:.1f}) | {', '.join(w['aggressors'][:5])} |")
             L.append("")
         if p["items"]:
             L += ["## Differential pairs", "", "| pair | length | mismatch | side-by-side |", "|---|---:|---:|---:|"]
@@ -72,19 +74,31 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
     digital_segs = [s for s in board.segs if kind.get(s.net) == "digital"]
     dig_idx = SegIndex(digital_segs, cell=2.0)
 
-    # coupling
+    # coupling, split by aggressor activity (clock / data / static) and weighted
+    weights = rules["activity_weight"]
+    acts = sorted(set(cls.activity.values()) | set(weights))
+    idx = {a: SegIndex([s for s in digital_segs if cls.activity.get(s.net, "data") == a], cell=2.0) for a in acts}
     per_net: dict[str, dict] = {}
+    by_act = {a: [0.0] * len(gaps) for a in acts}
     for s in analog_segs:
-        e = per_net.setdefault(s.net, {"near": [0.0] * len(gaps), "aggr": set()})
-        for i, g in enumerate(gaps):
-            l, nets = coupled_length(s, dig_idx, g)
-            e["near"][i] += l
-            if i == 0 or l:
+        e = per_net.setdefault(s.net, {"near": [0.0] * len(gaps), "weighted": [0.0] * len(gaps), "aggr": set()})
+        for a in acts:
+            if not idx[a].grid:
+                continue
+            for i, g in enumerate(gaps):
+                l, nets = coupled_length(s, idx[a], g)
+                e["near"][i] += l
+                e["weighted"][i] += l * weights.get(a, 1.0)
+                by_act[a][i] += l
                 e["aggr"] |= nets
-    worst = sorted(({"net": n, "near": e["near"], "aggressors": sorted(e["aggr"])} for n, e in per_net.items()
-                    if e["near"][-1] > 0), key=lambda x: (-x["near"][0], -x["near"][-1]))
-    coupling = {"gaps": gaps, "total_mm": {str(g): sum(e["near"][i] for e in per_net.values()) for i, g in enumerate(gaps)},
-                "worst": worst}
+    worst = sorted(({"net": n, "near": e["near"], "weighted": e["weighted"], "aggressors": sorted(e["aggr"])}
+                    for n, e in per_net.items() if e["near"][-1] > 0),
+                   key=lambda x: (-x["weighted"][0], -x["weighted"][-1]))
+    coupling = {"gaps": gaps,
+                "total_mm": {str(g): sum(e["near"][i] for e in per_net.values()) for i, g in enumerate(gaps)},
+                "weighted_mm": {str(g): sum(e["weighted"][i] for e in per_net.values()) for i, g in enumerate(gaps)},
+                "by_activity_mm": {a: {str(g): v[i] for i, g in enumerate(gaps)} for a, v in by_act.items()},
+                "weights": weights, "worst": worst}
 
     # analog length / vias
     alen: dict[str, float] = {}
@@ -142,7 +156,8 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
             "pairs": pairs, "gnd": gnd, "power": power,
             "analog_nets": {n: {"length_mm": round(alen.get(n, 0.0), 2), "vias": avias.get(n, 0)}
                             for n in cls.nets_of("analog")},
-            "classes": {n: [cls.kind[n], cls.why[n]] for n in sorted(cls.kind)},
+            "classes": {n: [cls.kind[n], cls.why[n]] + ([cls.activity[n]] if n in cls.activity else [])
+                        for n in sorted(cls.kind)},
             "pairs_found": cls.pairs, "score": score, "score_parts": parts}
     return Report(data)
 
@@ -150,10 +165,10 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
 def _score(board, summary, coupling, pairs, gnd, power) -> tuple[float, dict]:
     """0-100. Each part loses points smoothly; weights reflect audio priorities."""
     alen = max(summary["analog_length_mm"], 1.0)
-    g0 = coupling["total_mm"][str(coupling["gaps"][0])]
-    g1 = coupling["total_mm"][str(coupling["gaps"][-1])]
+    g0 = coupling["weighted_mm"][str(coupling["gaps"][0])]
+    g1 = coupling["weighted_mm"][str(coupling["gaps"][-1])]
     parts = {
-        # share of analog length close to digital (tight gap counts 3x)
+        # share of analog length close to digital, weighted by aggressor activity (tight gap counts 3x)
         "coupling": 35 * math.exp(-(3 * g0 + g1) / alen * 10),
         "pairs": 15 * (pairs["avg_parallel_pct"] / 100 if pairs["items"] else 1.0)
                  * math.exp(-pairs["max_mismatch_mm"] / 50),

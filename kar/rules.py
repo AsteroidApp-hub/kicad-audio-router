@@ -38,6 +38,16 @@ DEFAULTS: dict = {
                          r"NC3", r"NJ", r"NMJ", r"NRJ"],
     # pin-function regex on mixed-signal ICs: these pins are digital even on an analog IC
     "digital_pins": [r"CLK|SCK|SCL|SDA|DATA|SDI|SDO|LATCH|LAT|CS|^EN|RESET|RST|MUTE|ZC|DGND|DVDD|ADR|ADDR"],
+    # activity of digital nets: how harmful it is to run next to analog copper.
+    # checked in order clock -> data -> static; digital nets that match nothing are "data".
+    "activity_names": {
+        "clock": [r"CLK|SCK|SCL$|SCL_|BCLK|MCLK|LRCK|LRCLK|WCLK|(^|_)WS$|XTAL|OSC"],
+        "data": [r"DATA|SDA|MOSI|MISO|SDI|SDO|DIN|DOUT|(^|_)(TX|RX)D?\d*$|USB|D[+-]$"],
+        "static": [r"LAT|(^|_)EN(_|$)|OE(_|$)|PGOOD|RESET|RST|LED|MUTE|SEL|DRV|KD\d|COIL|RLY|INT$|IRQ"],
+    },
+    # parts whose outputs switch rarely (relay drivers, shift registers that set relays)
+    "static_parts": [r"^ULN", r"^TPIC", r"^MIC2981", r"^TBD62"],
+    "activity_weight": {"clock": 1.0, "data": 0.6, "static": 0.15},
     "metrics": {"coupling_gap_mm": [1.0, 3.0], "gnd_via_max_mm": 3.0, "power_min_width_mm": 0.4},
 }
 

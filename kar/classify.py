@@ -24,6 +24,7 @@ class Classification:
     kind: dict[str, str]                       # net -> kind
     why: dict[str, str]                        # net -> short reason
     pairs: list[tuple[str, str]] = field(default_factory=list)   # differential pairs (analog)
+    activity: dict[str, str] = field(default_factory=dict)       # digital net -> clock / data / static
 
     def nets_of(self, kind: str) -> list[str]:
         return sorted(n for n, k in self.kind.items() if k == kind)
@@ -103,7 +104,27 @@ def classify(board: Board, rules: dict) -> Classification:
                             changed = True
     for n in nets:
         setk(n, "other", "-")
-    return Classification(kind, why, find_pairs(kind, rules))
+    return Classification(kind, why, find_pairs(kind, rules), digital_activity(board, kind, rules))
+
+
+def digital_activity(board: Board, kind: dict[str, str], rules: dict) -> dict[str, str]:
+    """clock / data / static for each digital net (see rules["activity_names"])."""
+    fps = board.fp_by_ref()
+    pads = board.pads_by_net()
+    out = {}
+    for n, k in kind.items():
+        if k != "digital":
+            continue
+        bare = n.lstrip("/")
+        for act in ("clock", "data", "static"):
+            if _any(rules["activity_names"].get(act, []), bare):
+                out[n] = act
+                break
+        else:
+            touches_static = any(_any(rules["static_parts"], fps[p.ref].value) or fps[p.ref].prefix == "K"
+                                 for p in pads.get(n, []))
+            out[n] = "static" if touches_static else "data"
+    return out
 
 
 def find_pairs(kind: dict[str, str], rules: dict) -> list[tuple[str, str]]:

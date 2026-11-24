@@ -55,6 +55,7 @@ def test_classify():
     assert k["/SCLK"] == "digital" and k["/QA"] == "digital"
     assert k["/-15V"] == "power" and k["GND"] == "gnd"
     assert k["/IN_H"] == "analog" and ("/IN_H", "/IN_C") in cls.pairs
+    assert cls.activity["/SCLK"] == "clock" and cls.activity["/QA"] == "data"
 
 
 def test_rules_override():
@@ -68,6 +69,8 @@ def test_report():
     rep = build(b, classify(b, R.load(None)), R.load(None)).data
     assert rep["coupling"]["worst"][0]["net"] == "/OUT"
     assert rep["coupling"]["total_mm"]["1.0"] > 19
+    assert rep["coupling"]["by_activity_mm"]["clock"]["1.0"] > 19     # SCLK is a clock
+    assert rep["coupling"]["weighted_mm"]["1.0"] == rep["coupling"]["total_mm"]["1.0"]   # weight 1.0
     assert rep["pairs"]["items"][0]["parallel_pct"] > 90
     assert rep["power"]["narrow"][0]["net"] == "/+15V"
     assert rep["gnd"]["far"] == []                      # GND pad 0.5 mm from the via
