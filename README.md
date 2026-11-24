@@ -1,25 +1,38 @@
 # kicad-audio-router
 
-Audio-aware routing helpers for KiCad. **Status: early development (not released).**
+Audio-aware autorouter and routing checks for KiCad. **Status: early development (not released).**
 
-General-purpose autorouters (e.g. Freerouting) connect everything but know nothing about audio:
-they run analog signals next to clocks, split balanced pairs, and leave ground pads far from a via.
-kicad-audio-router reads your board, works out which nets are analog / digital / power / ground,
-and measures (and, in later versions, improves) the routing with audio in mind.
+General-purpose autorouters connect everything but know nothing about audio: they run analog signals
+next to clocks, split balanced pairs, and leave ground pads far from a via. kicad-audio-router reads your
+board, works out which nets are analog / digital / power / ground, and routes it with audio in mind:
 
-- Pure Python on top of KiCad's own `pcbnew` module (KiCad 7–10). No Java, no extra packages.
-- Deterministic: the same board and rules give the same result.
-- Machine-readable output (JSON) so it fits scripted / AI-driven design flows.
+- analog tracks keep away from digital copper (weighted by how active the digital net is)
+- the two sides of a balanced pair run side by side
+- every SMD ground pad gets its own via to the plane before signals are routed
+- clearances are checked against the real copper shapes, per net class, including hole clearance
+  and keep-out areas, so the result passes KiCad's DRC
 
-## Status
+It is pure Python on top of KiCad's own `pcbnew` module (KiCad 8–10): no Java, no extra packages,
+deterministic (same board + rules = same result), with JSON output for scripted or AI-driven flows.
 
-| feature | state |
-|---|---|
-| net classification (analog / digital / power / gnd, differential pairs) | ✅ v0.1 |
-| routing quality report (Markdown + JSON, 0–100 score) | ✅ v0.1 |
-| audio-aware router for every net (pairs side by side, analog away from digital, push-and-reroute) | ✅ v0.1 |
-| ground handling (pours, fan-out vias, island repair) | ✅ v0.1 |
-| optional hand-off of leftovers to Freerouting (DSN/SES), not needed so far | ✅ v0.1 |
+## Results so far
+
+Seven real audio boards (monitor controller, mic preamps, phantom supplies, VU meter, tape saturator),
+stripped of all tracks and routed from scratch with `kar auto`, compared with their original routing
+(hand-routed or Freerouting). Score: `kar report` (0–100, higher is better).
+
+| board | layers | original | kar | time |
+|---|---|---|---|---|
+| monitor controller (~270 parts, relays, MUSES72320) | 4 | 53.2 | 75.4 | 291 s |
+| VU meter (USB-C) | 2 | 80.8 | 92.4 | 40 s |
+| tape saturator | 4 | 81.1 | 89.1 | 70 s |
+| P48 phantom supply | 4 | 82.5 | 85.0 | 32 s |
+| 2-ch mic preamp (discrete) | 4 | 79.6 | 82.5 | 38 s |
+| mic preamp (op-amp) | 2 | 78.5 | 81.1 | 97 s |
+| phantom power unit | 2 | 99.3 | 100.0 | 8 s |
+
+All boards fully routed with no DRC problems introduced by kar (only issues already present in the
+originals, such as overlapping courtyards, remain).
 
 ## Usage
 
@@ -30,52 +43,75 @@ Run with the Python that ships with KiCad (it contains `pcbnew`):
 KPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3
 # Windows:  "C:\Program Files\KiCad\9.0\bin\python.exe"     Linux: python3 (with KiCad installed)
 
-$KPY -m kar classify board.kicad_pcb                 # how each net was classified, and why
-$KPY -m kar report   board.kicad_pcb --out out/      # writes board_quality.md / .json
-$KPY -m kar report   board.kicad_pcb --json          # score only, for scripts
-$KPY -m kar route    board.kicad_pcb --classes analog,power,digital,other -o routed.kicad_pcb
-$KPY -m kar ground   routed.kicad_pcb --net GND,/CHASSIS -o out.kicad_pcb
-                                                     # vias for ground pads far from one, island repair
-$KPY -m kar ground   board.kicad_pcb --pour F.Cu,B.Cu   # also pour GND on the outer layers first
+$KPY -m kar auto     board.kicad_pcb -o routed.kicad_pcb      # route + ground + DRC + report
+$KPY -m kar classify board.kicad_pcb                         # how each net was classified, and why
+$KPY -m kar report   board.kicad_pcb --out out/              # quality report (Markdown + JSON)
 ```
 
-`ground` works on a routed board. For every SMD pad of the ground net(s) with no via / through-hole pad
-of the same net within `--max-dist` (3 mm, measured from the pad edge) it adds a short track and a via,
-searching outwards from the pad (away from the part body first) and keeping clearance to all other copper
-on every layer. Pour islands that reach no via / through-hole pad get one via at their deepest point.
-Always run KiCad's DRC afterwards.
+Place the parts first (kar does not move footprints). Existing tracks are kept; `kar strip` removes them
+if you want to start over. Always review the result in KiCad and run its DRC before ordering.
+
+### Commands
+
+| command | what it does |
+|---|---|
+| `auto` | `route` → `ground` → KiCad DRC (kicad-cli) → `report`, one summary in JSON |
+| `route` | routes the nets (`--classes analog,power,digital,other`); ground fan-out first |
+| `ground` | ground vias for pads far from one, island repair, optional pours (`--pour F.Cu,B.Cu`) |
+| `report` | routing quality report and score |
+| `classify` | net classification with reasons |
+| `bench DIR` | strips and re-routes every board in a folder, compares with the original routing |
+| `strip` | removes tracks and vias |
+| `finish` | optional: hands nets kar could not route to Freerouting (DSN/SES); not needed so far |
+
+### How it routes
+
+- A* search on a 0.25 mm grid over the routing layers (inner layers typed *power* in the board setup are
+  left to planes), 8 directions plus vias; the grid is aligned to fine-pitch pads.
+- Clearance is checked exactly near copper: the distance from a grid point to the real pad outline /
+  track / via must leave the net-class clearance plus half the track width, with an allowance for the
+  straight run to the next grid point.
+- Cost fields: analog nets pay for running near digital copper, digital nets for running near analog.
+  The second side of a pair pays for leaving the line one track pitch beside the first side; if the
+  sides do not run together, a stronger pull and the reverse order are tried.
+- Order: pairs, analog, power (wide, narrowed only where needed), digital, other.
+- Nets that fail are routed again through other routes at a price ("push"), and the nets they cross are
+  re-routed; what still fails is tried on a grid twice as fine, aligned to its pads.
 
 ### What the report measures
 
 | metric | meaning |
 |---|---|
-| coupling | analog copper running within 1 mm / 3 mm (edge to edge, same layer) of digital copper, weighted by how active the digital net is (clock 1.0, data 0.6, static 0.15) |
+| coupling | analog copper within 1 mm / 3 mm (edge to edge, same layer) of digital copper, weighted by how active the digital net is (clock 1.0, data 0.6, static 0.15) |
 | differential pairs | length of each side, mismatch, share routed side by side |
 | ground return | SMD pads of each ground net farther than 3 mm (from the pad edge) from a via / through-hole pad of the same net |
 | power width | power nets with tracks narrower than the limit |
 | analog vias | vias on analog nets |
 | unrouted | unconnected items reported by KiCad |
 
-The score (0–100) weights these for audio work so that two routing runs of the same board can be compared.
+The score weights these for audio work so that two routings of the same board can be compared.
 It is a comparison aid, not an absolute grade.
 
 ### How nets are classified
 
 1. explicit globs in the rules file
-2. ground / power by name (`GND`, `AGND`, `+15V`, `VCC`, …)
+2. ground / power by name (`GND`, `AGND`, `CHASSIS`, `+15V`, `VCC`, …)
 3. digital by name (`SCLK`, `SDA`, `LATCH`, …), by touching a digital IC (`74*`, `ULN*`, MCU, …),
-   or a digital pin of a mixed-signal IC (e.g. the `CLOCK` pin of an electronic volume)
-4. analog: pins of analog ICs (`OPA*`, `NE5532`, `MUSES*`, …) and audio connectors, then spread through
-   resistors, capacitors and relay contacts
-5. pairs: analog nets whose names differ only by a suffix pair (`_H`/`_C`, `_P`/`_N`, `+`/`-`)
+   or a digital pin of a mixed-signal IC
+4. analog: pins of analog ICs (`OPA*`, `NE5532`, `NJM*`, `MUSES*`, …) and audio connectors (by footprint,
+   value or reference: XLR, jack, `MIC IN`, `OUT L`, `JINL`), then spread through resistors, capacitors,
+   transistors, switches, transformers, pots, diodes and relay contacts
+5. pairs: `_H`/`_C`, `_P`/`_N`, `+`/`-` suffixes and `HOT`/`COLD`, `POS`/`NEG` anywhere in the name
 
-Override anything with a rules file (`--rules rules.json`, see `examples/rules.example.json`
-and the docstring in `kar/rules.py`).
+House-style designators (`RGaR` resistor, `DBL` diode, `RLL` + value `HFD27` relay) are recognised.
+Override anything with a rules file (`--rules rules.json`, see `examples/rules.example.json` and
+`kar/rules.py`).
 
 ## Development
 
 ```sh
 python3 tests/test_core.py        # core tests, no KiCad needed
+$KPY -m kar bench path/to/boards  # regression run on a folder of your own boards
 ```
 
 ## License
