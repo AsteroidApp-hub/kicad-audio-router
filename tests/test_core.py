@@ -141,6 +141,21 @@ def test_router_pair():
     assert rep["pairs"]["items"][0]["parallel_pct"] > 60, rep["pairs"]["items"]
 
 
+def test_drop_nets():
+    from kar.freerouting import drop_nets
+    dsn = """(pcb x (network
+    (net GND (pins U1-4 C1-2))
+    (net "/SIG A" (pins U1-1 R1-1))
+    (net /CHASSIS (pins H1-1))
+    (class kicad_default "" GND "/SIG A" /CHASSIS (rule (width 200)))
+  ))"""
+    out, dropped = drop_nets(dsn, {"GND", "/CHASSIS"})
+    assert dropped == ["GND", "/CHASSIS"]
+    assert "U1-4" not in out and "H1-1" not in out and '"/SIG A" (pins' in out
+    assert "(class kicad_default \"\" \"/SIG A\" (rule" in out
+    assert out.count("(") == out.count(")")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

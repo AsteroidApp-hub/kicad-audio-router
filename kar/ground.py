@@ -99,18 +99,22 @@ class Obstacles:
         reach = r + clearance + 2.0
         for key in self._near_keys(x, y, reach):
             for p in self.pads.get(key, ()):
-                d = _box_dist(p.box(), x, y) - r
-                if d < (clearance if p.net != net else 0.05):
+                d = p.dist(x, y) - r
+                if d < (self.cl(clearance, net, p.net) if p.net != net else 0.05):
                     return False
             for (vx, vy, vr, vn) in self.vias.get(key, ()):
-                if math.hypot(vx - x, vy - y) - r - vr < (clearance if vn != net else 0.1):
+                if math.hypot(vx - x, vy - y) - r - vr < (self.cl(clearance, net, vn) if vn != net else 0.1):
                     return False
         bb = (x - reach, y - reach, x + reach, y + reach)
         for layer in self.layers:
             for s in self.segs.near(layer, bb):
-                if s.net != net and point_seg_dist(x, y, s.x1, s.y1, s.x2, s.y2) - s.width / 2 - r < clearance:
+                if s.net != net and point_seg_dist(x, y, s.x1, s.y1, s.x2, s.y2) - s.width / 2 - r < \
+                        self.cl(clearance, net, s.net):
                     return False
         return True
+
+    def cl(self, base: float, a: str, b: str) -> float:
+        return self.board.clearance(a, b, default=base)
 
     def track_ok(self, x1, y1, x2, y2, w, layer, net, clearance, own_pad: Pad) -> bool:
         L = math.hypot(x2 - x1, y2 - y1)
@@ -125,13 +129,13 @@ class Obstacles:
             t = k / n
             px, py = x1 + t * (x2 - x1), y1 + t * (y2 - y1)
             for s in segs:
-                if point_seg_dist(px, py, s.x1, s.y1, s.x2, s.y2) - s.width / 2 - w / 2 < clearance:
+                if point_seg_dist(px, py, s.x1, s.y1, s.x2, s.y2) - s.width / 2 - w / 2 < self.cl(clearance, net, s.net):
                     return False
             for p in pads.values():
-                if _box_dist(p.box(), px, py) - w / 2 < clearance:
+                if p.dist(px, py) - w / 2 < self.cl(clearance, net, p.net):
                     return False
-            for (vx, vy, vr, _) in vias:
-                if math.hypot(vx - px, vy - py) - vr - w / 2 < clearance:
+            for (vx, vy, vr, vn) in vias:
+                if math.hypot(vx - px, vy - py) - vr - w / 2 < self.cl(clearance, net, vn):
                     return False
         return True
 
@@ -235,8 +239,10 @@ def plan_fanout(board: Board, prm: GroundParams, obst: Obstacles | None = None) 
 
 
 def plan_islands(board: Board, islands: list[list[tuple[float, float]]], prm: GroundParams,
-                 obst: Obstacles | None = None, grid: float = 0.1) -> tuple[list[ViaPlan], int]:
-    """`islands`: polygons of pour islands of prm.net. Returns (vias, islands that could not get one)."""
+                 obst: Obstacles | None = None, grid: float = 0.1,
+                 failed_polys: list | None = None) -> tuple[list[ViaPlan], int]:
+    """`islands`: polygons of pour islands of prm.net. Returns (vias, islands that could not get one);
+    the polygons that could not get one are appended to `failed_polys` when given."""
     obst = obst or Obstacles(board)
     circles = anchor_circles(board, prm.net)
     r = prm.via_d / 2
@@ -262,4 +268,16 @@ def plan_islands(board: Board, islands: list[list[tuple[float, float]]], prm: Gr
             circles.append((best[1], best[2], r))
         else:
             failed += 1
+            if failed_polys is not None:
+                failed_polys.append(poly)
     return plans, failed
+
+
+def pads_on_island(board: Board, poly, net: str) -> list[str]:
+    """SMD pads of `net` lying on (or touching) a pour island."""
+    out = []
+    for fp in board.footprints:
+        for p in fp.pads:
+            if p.net == net and p.smd and (_point_in_poly(p.x, p.y, poly) or _poly_edge_dist(p.x, p.y, poly) < 0.3):
+                out.append(f"{p.ref}.{p.number}")
+    return out

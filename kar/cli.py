@@ -3,6 +3,7 @@
   python -m kar classify BOARD.kicad_pcb [--rules R.json]          # how nets were classified
   python -m kar report   BOARD.kicad_pcb [--rules R.json] [--out DIR] [--json]
   python -m kar route    BOARD.kicad_pcb [--classes analog,power,digital,other] [--nets A,B] [-o OUT]
+  python -m kar finish   BOARD.kicad_pcb --jar freerouting.jar [--java java] [--passes 30] [-o OUT]
   python -m kar strip    BOARD.kicad_pcb -o OUT.kicad_pcb            # remove tracks/vias (experiments)
   python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
@@ -93,15 +94,43 @@ def cmd_ground(args) -> int:
         model = kicad_io.from_pcbnew(kb, args.board)
         plans, failed = plan_fanout(model, prm, Obstacles(model))
         res["fanout_vias"] = kicad_io.apply_vias(kb, plans, net, prm.via_d, prm.via_drill, prm.track_w)
+        if failed:
+            # no straight shot to a via site: walk around other copper with the router
+            from .classify import classify
+            from .router import RouteParams, escape_to_via
+            model = kicad_io.from_pcbnew(kb, args.board)
+            rules = R.load(None)
+            routes, failed = escape_to_via(model, classify(model, rules), RouteParams(clearance=prm.clearance,
+                                           via_d=prm.via_d, via_drill=prm.via_drill), rules["activity_weight"],
+                                           net, failed, width=prm.track_w)
+            kicad_io.apply_routes(kb, routes, prm.via_d, prm.via_drill, lock=False)
+            res["escape_vias"] = len(routes)
         res["fanout_failed"] = failed
         kicad_io.refill(kb)
         model = kicad_io.from_pcbnew(kb, args.board)
         obst = Obstacles(model)
+        stuck = []
         for layer in sorted({l for n, l in model.zones if n == net}):
-            iplans, ifail = plan_islands(model, kicad_io.islands(kb, net, layer), prm, obst)
+            iplans, ifail = plan_islands(model, kicad_io.islands(kb, net, layer), prm, obst, failed_polys=stuck)
             res["island_vias"] += kicad_io.apply_vias(kb, iplans, net, prm.via_d, prm.via_drill, prm.track_w)
             res["islands_failed"] += ifail
             model.vias += [Via(p.x, p.y, net, prm.via_d, prm.via_drill) for p in iplans]   # seen by next layer
+        if stuck:
+            # an island too small or crowded for a via: walk from a pad on it to a via site
+            from .classify import classify
+            from .ground import pads_on_island
+            from .router import RouteParams, escape_to_via
+            kicad_io.refill(kb)
+            model = kicad_io.from_pcbnew(kb, args.board)
+            names = sorted({n for poly in stuck for n in pads_on_island(model, poly, net)})
+            rules = R.load(None)
+            routes, efail = escape_to_via(model, classify(model, rules), RouteParams(clearance=prm.clearance,
+                                          via_d=prm.via_d, via_drill=prm.via_drill), rules["activity_weight"],
+                                          net, names, width=prm.track_w)
+            kicad_io.apply_routes(kb, routes, prm.via_d, prm.via_drill, lock=False)
+            res["island_escapes"] = len(routes)
+            res["islands_failed"] -= sum(1 for poly in stuck
+                                         if any(n not in efail for n in pads_on_island(model, poly, net)))
         kicad_io.refill(kb)
         bad |= bool(failed or res["islands_failed"])
         results.append(res)
@@ -125,6 +154,25 @@ def cmd_route(args) -> int:
     prm.classes = tuple(c.strip() for c in args.classes.split(",") if c.strip())
     nets = [n.strip() for n in args.nets.split(",")] if args.nets else None
     t0 = time.time()
+    # ground fan-out first (like a designer would): every SMD ground pad gets its via before signals
+    # are routed, so signal tracks cannot wall it in
+    fan = {}
+    if not args.no_fanout:
+        from .geometry import Seg
+        from .ground import GroundParams, Obstacles, plan_fanout
+        from .model import Via
+        for gnet in cls.nets_of("gnd"):
+            # a ground via "nearby" is not enough here: signal tracks may later run between the pad and it,
+            # so (almost) every SMD ground pad gets its own via
+            gp = GroundParams(net=gnet, clearance=args.clearance, max_dist=args.fanout_dist)
+            plans, _ = plan_fanout(board, gp, Obstacles(board))
+            kicad_io.apply_vias(kb, plans, gnet, gp.via_d, gp.via_drill, gp.track_w)
+            for pl in plans:
+                board.vias.append(Via(pl.x, pl.y, gnet, gp.via_d, gp.via_drill))
+                if pl.track:
+                    x1, y1, x2, y2, layer = pl.track
+                    board.segs.append(Seg(x1, y1, x2, y2, gp.track_w, layer, gnet))
+            fan[gnet] = len(plans)
 
     def prog(net, ok):
         if not args.json:
@@ -134,11 +182,47 @@ def cmd_route(args) -> int:
     kicad_io.refill(kb)
     out = args.output or args.board
     kicad_io.save(kb, out)
-    summary = {"saved": out, "routed": len(res.routed), "failed": res.failed, "tracks": nt, "vias": nv,
+    summary = {"saved": out, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
+               "tracks": nt, "vias": nv,
                "layers": prm.layers or [l for l in board.copper_layers if l not in board.plane_layers],
                "seconds": round(time.time() - t0, 1)}
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     return 0 if not res.failed else 2
+
+
+def cmd_finish(args) -> int:
+    import time
+    from . import freerouting as FR
+    from . import kicad_io
+    from .classify import classify
+    jar = args.jar or os.environ.get("KAR_FREEROUTING_JAR")
+    java = args.java or os.environ.get("KAR_JAVA", "java")
+    if not jar or not os.path.exists(jar):
+        raise SystemExit("Freerouting jar not found: pass --jar or set KAR_FREEROUTING_JAR")
+    board, kb = kicad_io.load(args.board)
+    cls = classify(board, R.load(args.rules))
+    exclude = set(cls.nets_of("gnd")) | set(cls.nets_of("ignore"))
+    if args.route_ground:
+        exclude -= set(cls.nets_of("gnd"))
+    out = args.output or args.board
+    work = os.path.join(os.path.dirname(os.path.abspath(out)), "freerouting_work")
+    os.makedirs(work, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(out))[0]
+    dsn, ses, log = (os.path.join(work, stem + e) for e in (".dsn", ".ses", ".log"))
+    locked_before = sum(1 for t in kb.GetTracks() if t.IsLocked())
+    t0 = time.time()
+    dropped = FR.export_dsn(kb, dsn, exclude)
+    FR.run(dsn, ses, jar, java, args.passes, args.timeout, log)
+    FR.import_ses(kb, ses)
+    locked_after = sum(1 for t in kb.GetTracks() if t.IsLocked())
+    removed = FR.cleanup_dangling(kb)
+    kicad_io.refill(kb)
+    kicad_io.save(kb, out)
+    after = kicad_io.from_pcbnew(kb, out)
+    print(json.dumps({"saved": out, "excluded_nets": dropped, "locked_tracks": [locked_before, locked_after],
+                      "dangling_removed": removed, "unrouted": after.unrouted, "log": log,
+                      "seconds": round(time.time() - t0, 1)}, ensure_ascii=False, indent=1))
+    return 0
 
 
 def cmd_strip(args) -> int:
@@ -173,8 +257,21 @@ def main(argv=None) -> int:
     r.add_argument("--grid", type=float, default=0.25)
     r.add_argument("--clearance", type=float, default=0.2)
     r.add_argument("--no-lock", action="store_true", help="do not lock the new tracks")
+    r.add_argument("--no-fanout", action="store_true", help="do not place ground vias before routing")
+    r.add_argument("--fanout-dist", type=float, default=1.0,
+                   help="before routing, ground pads without a ground via this close get one (default 1 mm)")
     r.add_argument("--json", action="store_true")
     r.set_defaults(fn=cmd_route)
+    fz = sub.add_parser("finish", help="route what is left with Freerouting, keeping locked tracks")
+    fz.add_argument("board")
+    fz.add_argument("-o", "--output")
+    fz.add_argument("--rules")
+    fz.add_argument("--jar", help="freerouting.jar (or env KAR_FREEROUTING_JAR)")
+    fz.add_argument("--java", help="java executable (or env KAR_JAVA; Freerouting 2.1 needs Java 21)")
+    fz.add_argument("--passes", type=int, default=30)
+    fz.add_argument("--timeout", type=int, default=3600)
+    fz.add_argument("--route-ground", action="store_true", help="also let Freerouting route ground nets")
+    fz.set_defaults(fn=cmd_finish)
     st = sub.add_parser("strip", help="remove tracks and vias")
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)

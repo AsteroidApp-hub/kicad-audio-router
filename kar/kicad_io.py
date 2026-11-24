@@ -34,6 +34,7 @@ def load(path: str) -> tuple[Board, "pcbnew.BOARD"]:
 def from_pcbnew(kb, source: str = "") -> Board:
     copper = [kb.GetLayerName(l) for l in kb.GetEnabledLayers().CuStack()]
     fps = []
+    ncl: dict[str, float] = {}
     for fp in kb.GetFootprints():
         f = Footprint(fp.GetReference(), fp.GetValue(), str(fp.GetFPID().GetLibItemName()))
         for p in fp.Pads():
@@ -41,10 +42,17 @@ def from_pcbnew(kb, source: str = "") -> Board:
             layers = tuple(kb.GetLayerName(l) for l in p.GetLayerSet().CuStack())
             pf = p.GetPinFunction() if hasattr(p, "GetPinFunction") else ""
             pt = p.GetPinType() if hasattr(p, "GetPinType") else ""
+            if p.GetNetname():
+                try:
+                    c = _mm(p.GetOwnClearance(p.GetLayerSet().CuStack()[0]))
+                    ncl[p.GetNetname()] = max(ncl.get(p.GetNetname(), 0.0), c)
+                except Exception:   # noqa: BLE001
+                    pass
             bb = p.GetBoundingBox()
             f.pads.append(Pad(fp.GetReference(), p.GetNumber(), p.GetNetname(), _mm(pos.x), _mm(pos.y),
                               p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD, layers, pf, pt,
-                              (_mm(bb.GetLeft()), _mm(bb.GetTop()), _mm(bb.GetRight()), _mm(bb.GetBottom()))))
+                              (_mm(bb.GetLeft()), _mm(bb.GetTop()), _mm(bb.GetRight()), _mm(bb.GetBottom())),
+                              _pad_poly(p)))
         fps.append(f)
     segs, vias = [], []
     for t in kb.GetTracks():
@@ -71,12 +79,31 @@ def from_pcbnew(kb, source: str = "") -> Board:
                 planes.append(kb.GetLayerName(l))
         except Exception:   # noqa: BLE001
             pass
-    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes)
+    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes, ncl)
 
 
 def _area(poly) -> float:
     n = len(poly)
     return abs(sum(poly[i][0] * poly[(i + 1) % n][1] - poly[(i + 1) % n][0] * poly[i][1] for i in range(n))) / 2
+
+
+def _pad_poly(p) -> list[tuple[float, float]] | None:
+    """Copper outline of a pad (first layer), or None if this KiCad version cannot give it."""
+    ps = None
+    for args in ((p.GetLayerSet().CuStack()[0] if p.GetLayerSet().CuStack() else pcbnew.F_Cu, pcbnew.ERROR_INSIDE),
+                 (pcbnew.ERROR_INSIDE,)):
+        try:
+            ps = p.GetEffectivePolygon(*args)
+            break
+        except Exception:   # noqa: BLE001
+            continue
+    try:
+        if ps is None or ps.OutlineCount() == 0:
+            return None
+        o = ps.Outline(0)
+        return [(_mm(o.CPoint(k).x), _mm(o.CPoint(k).y)) for k in range(o.PointCount())]
+    except Exception:   # noqa: BLE001
+        return None
 
 
 def _outline(kb) -> list[list[tuple[float, float]]]:

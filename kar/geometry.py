@@ -111,3 +111,19 @@ def coupled_length(victim: Seg, aggressors: SegIndex, gap: float, step: float = 
                 nets.add(s.net)
                 break
     return total, nets
+
+
+def point_in_poly(x: float, y: float, poly) -> bool:
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def point_poly_dist(x: float, y: float, poly) -> float:
+    n = len(poly)
+    return min(point_seg_dist(x, y, *poly[i], *poly[(i + 1) % n]) for i in range(n))

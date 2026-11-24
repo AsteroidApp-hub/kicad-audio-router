@@ -19,9 +19,30 @@ class Pad:
     pin_function: str = ""           # pin name from the schematic, if any
     pin_type: str = ""               # electrical type from the schematic, if any
     bbox: tuple[float, float, float, float] | None = None   # copper extent (x0, y0, x1, y1)
+    poly: list[tuple[float, float]] | None = None             # copper outline (mm), if known
 
     def box(self) -> tuple[float, float, float, float]:
         return self.bbox or (self.x - 0.3, self.y - 0.3, self.x + 0.3, self.y + 0.3)
+
+    def contains(self, x: float, y: float, inset: float = 0.0) -> bool:
+        """Is (x, y) on the pad copper, at least `inset` inside its edge?"""
+        b = self.box()
+        if not (b[0] + inset <= x <= b[2] - inset and b[1] + inset <= y <= b[3] - inset):
+            return False
+        if not self.poly:
+            return True
+        from .geometry import point_in_poly, point_poly_dist
+        return point_in_poly(x, y, self.poly) and (inset <= 0 or point_poly_dist(x, y, self.poly) >= inset)
+
+    def dist(self, x: float, y: float) -> float:
+        """Distance from (x, y) to the pad copper (0 inside)."""
+        b = self.box()
+        dx = max(b[0] - x, 0.0, x - b[2])
+        dy = max(b[1] - y, 0.0, y - b[3])
+        if not self.poly:
+            return (dx * dx + dy * dy) ** 0.5
+        from .geometry import point_in_poly, point_poly_dist
+        return 0.0 if point_in_poly(x, y, self.poly) else point_poly_dist(x, y, self.poly)
 
 
 @dataclass
@@ -55,7 +76,12 @@ class Board:
     unrouted: int | None = None
     source: str = ""
     outline: list[list[tuple[float, float]]] = field(default_factory=list)   # board outline polygon(s)
-    plane_layers: list[str] = field(default_factory=list)   # inner layers mostly covered by one zone
+    plane_layers: list[str] = field(default_factory=list)   # inner layers typed "power" in the board setup
+    net_clearance: dict[str, float] = field(default_factory=dict)   # net -> clearance from its net class
+
+    def clearance(self, *nets: str, default: float = 0.2) -> float:
+        """Clearance needed between copper of these nets (the larger rule wins)."""
+        return max([default] + [self.net_clearance.get(n, 0.0) for n in nets])
 
     @property
     def nets(self) -> set[str]:
