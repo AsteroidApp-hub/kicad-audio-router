@@ -447,8 +447,11 @@ class _Search:
             self.field, self.fw = None, 0.0
         self.room = None                     # set for the first side of a pair: cost of crowded cells
         self._room: dict[int, float] = {}
-        self._t: dict[int, object] = {}      # track check cache: OK, FIXED or frozenset of routed net ids
-        self._v: dict[int, object] = {}      # via check cache
+        # check caches: byte per cell, 0 unknown, 1 OK, 2 FIXED, 3 crossing routed nets (set kept in a dict)
+        self._tc = bytearray(g.L * g.W * g.H)
+        self._vc = bytearray(g.W * g.H)
+        self._tset: dict[int, frozenset] = {}
+        self._vset: dict[int, frozenset] = {}
         self._need: dict[tuple[int, float], float] = {}
 
     def _need_e(self, nid: int, half: float) -> float:
@@ -522,18 +525,33 @@ class _Search:
 
     def track_state(self, li: int, cx: int, cy: int):
         key = (li * self.g.H + cy) * self.g.W + cx
-        r = self._t.get(key)
-        if r is None:
-            r = self._check(li, cx, cy, self.half)
-            self._t[key] = r
+        c = self._tc[key]
+        if c == 1:
+            return OK
+        if c == 2:
+            return FIXED
+        if c == 3:
+            return self._tset[key]
+        r = self._check(li, cx, cy, self.half)
+        if r is OK:
+            self._tc[key] = 1
+        elif r is FIXED:
+            self._tc[key] = 2
+        else:
+            self._tc[key] = 3
+            self._tset[key] = r
         return r
 
     def via_state(self, cx: int, cy: int):
         g = self.g
         key = cy * g.W + cx
-        r = self._v.get(key)
-        if r is not None:
-            return r
+        c = self._vc[key]
+        if c == 1:
+            return OK
+        if c == 2:
+            return FIXED
+        if c == 3:
+            return self._vset[key]
         r = OK
         # keep-outs: no via whose copper reaches a no-via cell
         k = int(math.ceil(self.via_r / g.res))
@@ -545,15 +563,21 @@ class _Search:
         if r is OK:
             acc = set()
             for li in range(g.L):
-                s = self._check(li, cx, cy, self.via_r, step_err=False)
-                if s is FIXED:
+                st = self._check(li, cx, cy, self.via_r, step_err=False)
+                if st is FIXED:
                     r = FIXED
                     break
-                if s is not OK:
-                    acc |= s
+                if st is not OK:
+                    acc |= st
             if r is OK and acc:
                 r = frozenset(acc)
-        self._v[key] = r
+        if r is OK:
+            self._vc[key] = 1
+        elif r is FIXED:
+            self._vc[key] = 2
+        else:
+            self._vc[key] = 3
+            self._vset[key] = r
         return r
 
     def ok(self, li: int, cx: int, cy: int) -> bool:
@@ -595,6 +619,8 @@ class _Search:
         via_cost = self.via_cost
         tgt = {(li * H + y) * W + x for li, x, y in targets}
         track_state = self.track_state
+        tcache = self._tc
+        vcache = self._vc
 
         def h(x, y):
             best = 1e18
@@ -655,7 +681,11 @@ class _Search:
                 if closed[nid]:
                     continue
                 c = step
-                if not cell_ok(nid, li, nx, ny):
+                tcv = tcache[nid]
+                if tcv == 0:
+                    track_state(li, nx, ny)
+                    tcv = tcache[nid]
+                if tcv != 1:
                     if push is None:
                         continue
                     pc = self.push_step(li, nx, ny)
@@ -678,7 +708,13 @@ class _Search:
                     push_(heap, (ng + h(nx, ny), cnt, nid))
                     cnt += 1
             if L > 1:
-                vs = self.via_state(cx, cy)
+                vcv = vcache[rem]
+                if vcv == 1:
+                    vs = OK
+                elif vcv == 2 and push is None:
+                    continue
+                else:
+                    vs = self.via_state(cx, cy)
                 if vs is OK:
                     vextra = 0.0
                 else:

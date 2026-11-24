@@ -41,8 +41,13 @@ class Pad:
         dy = max(b[1] - y, 0.0, y - b[3])
         if not self.poly:
             return (dx * dx + dy * dy) ** 0.5
-        from .geometry import point_in_poly, point_poly_dist
-        return 0.0 if point_in_poly(x, y, self.poly) else point_poly_dist(x, y, self.poly)
+        from .geometry import edges_dist2, point_in_poly, poly_edges
+        e = self.__dict__.get("_edges")
+        if e is None:
+            e = self.__dict__["_edges"] = poly_edges(self.poly)
+        if (dx > 0 or dy > 0) or not point_in_poly(x, y, self.poly):
+            return edges_dist2(x, y, e) ** 0.5
+        return 0.0
 
 
 @dataclass

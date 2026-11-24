@@ -127,3 +127,32 @@ def point_in_poly(x: float, y: float, poly) -> bool:
 def point_poly_dist(x: float, y: float, poly) -> float:
     n = len(poly)
     return min(point_seg_dist(x, y, *poly[i], *poly[(i + 1) % n]) for i in range(n))
+
+
+def poly_edges(poly) -> list[tuple[float, float, float, float, float]]:
+    """Precomputed edges (x1, y1, dx, dy, length^2) for fast distance queries."""
+    out = []
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        out.append((x1, y1, dx, dy, dx * dx + dy * dy))
+    return out
+
+
+def edges_dist2(px: float, py: float, edges) -> float:
+    """Squared distance from a point to a closed polygon outline given by poly_edges()."""
+    best = 1e30
+    for x1, y1, dx, dy, l2 in edges:
+        if l2 == 0.0:
+            t = 0.0
+        else:
+            t = ((px - x1) * dx + (py - y1) * dy) / l2
+            t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        ex = x1 + t * dx - px
+        ey = y1 + t * dy - py
+        d = ex * ex + ey * ey
+        if d < best:
+            best = d
+    return best
