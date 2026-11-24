@@ -2,6 +2,8 @@
 
 Audio-aware autorouter and routing checks for KiCad. **Status: early development (not released).**
 
+[日本語](README.ja.md)
+
 General-purpose autorouters connect everything but know nothing about audio: they run analog signals
 next to clocks, split balanced pairs, and leave ground pads far from a via. kicad-audio-router reads your
 board, works out which nets are analog / digital / power / ground, and routes it with audio in mind:
