@@ -44,7 +44,7 @@ class RouteParams:
     width: dict = field(default_factory=lambda: {"analog": 0.25, "power": 0.5, "digital": 0.2, "other": 0.25})
     narrow_width: dict = field(default_factory=lambda: {"power": 0.3})   # retry width when the wide one fails
     near_mm: float = 3.0              # reach of the proximity cost fields
-    near_cost: float = 3.0            # extra cost per step right next to the other kind (falls off linearly)
+    near_cost: float = 6.0            # extra cost per step right next to the other kind (falls off linearly)
     pair_gap: float = 0.25            # target edge gap between the two sides of a pair
     pair_cost: float = 1.5            # extra cost per step for the second side away from the first
     window_mm: float = 12.0           # search window around the net, widened once on failure
@@ -57,7 +57,7 @@ class RouteParams:
     push_cost_analog: float = 60.0    # ... through an analog track
     push_limit: int = 4               # how many times one net may push others
     local_rip: bool = False           # also try ripping up everything near a failed net's pads first
-    h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 2.0, "other": 2.0})
+    h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 1.2, "other": 1.5})
     # >1 makes A* greedier (much faster on long nets, paths slightly longer than optimal)
     layers: list[str] | None = None   # routing layers (default: copper minus plane layers)
     classes: tuple[str, ...] = ("analog", "power", "digital", "other")
@@ -471,7 +471,7 @@ class _Search:
             cnt += 1
         heapq.heapify(heap)
         closed = bytearray(L * WH)
-        budget = prm.max_expand
+        budget = prm.max_expand * (4 if push is not None else 1)   # pushing searches cross the board
         pop, push_ = heapq.heappop, heapq.heappush
         found = -1
         while heap:
