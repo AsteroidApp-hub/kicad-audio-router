@@ -1,0 +1,14 @@
+[project]
+name = "kicad-audio-router"
+version = "0.1.0.dev0"
+description = "Audio-aware routing helpers for KiCad: net classification, quality report, pre-routing, ground handling"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []   # pcbnew comes with KiCad; core modules are pure Python
+
+[project.scripts]
+kar = "kar.cli:main"
+
+[tool.setuptools]
+packages = ["kar"]

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+out/
+*.kicad_prl
+*.lck
+fp-info-cache

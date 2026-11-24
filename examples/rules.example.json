@@ -1,0 +1,9 @@
+{
+  "classes": {
+    "analog":  [],
+    "digital": ["/KD*"],
+    "ignore":  []
+  },
+  "diff_pairs": [["_H", "_C"]],
+  "metrics": { "coupling_gap_mm": [1.0, 3.0], "gnd_via_max_mm": 3.0, "power_min_width_mm": 0.35 }
+}
