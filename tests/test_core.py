@@ -173,6 +173,27 @@ def test_widen_power():
     assert tight.segs[0].width == 0.3 and n == 1
 
 
+def test_route_overlapping_pads():
+    """Pads of one net stacked on each other (mounting hole ring + vias, USB-C VBUS pins) must not
+    make the net look unreachable."""
+    from kar.model import Board, Footprint, Pad
+    from kar.router import RouteParams, route
+
+    def pad(ref, num, x, y, r):
+        return Pad(ref, num, "/CH", x, y, False, ("F.Cu", "B.Cu"), bbox=(x - r, y - r, x + r, y + r))
+    h1 = Footprint("H1", "", "MountingHole_3.2mm_M3_Pad_Via", [pad("H1", "1", 10, 10, 3.0), pad("H1", "1", 12, 10, 0.4),
+                                                               pad("H1", "1", 8, 10, 0.4)])
+    j1 = Footprint("J1", "", "Conn", [pad("J1", "1", 30, 10, 0.8)])
+    sq = [(0, 0), (40, 0), (40, 20), (0, 20)]
+    b = Board([h1, j1], [], [], ["F.Cu", "B.Cu"], outline=[sq])
+    rules = R.load(None)
+    cls = classify(b, rules)
+    prm = RouteParams(layers=["F.Cu", "B.Cu"])
+    prm.classes = ("gnd", "other")
+    res = route(b, cls, prm, rules["activity_weight"], nets=["/CH"])
+    assert res.failed == [], res.failed
+
+
 def test_drop_nets():
     from kar.freerouting import drop_nets
     dsn = """(pcb x (network

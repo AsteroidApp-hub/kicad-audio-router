@@ -932,7 +932,9 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         # a pad with no cell this track can stand on cannot be reached on this grid: give up at once
         # (fine-pitch pins off the grid phase; the fine-grid fallback handles them)
         if push is None:
-            reachable = lambda srch, k: any(srch.track_state(*c) is OK for c, kk in targets.items() if kk == k)
+            # each pad's own cells (pads of one net may overlap, e.g. mounting holes, USB-C VBUS/GND pins)
+            own_cells = {k: _pad_cells(g, remaining[k]) for k in near_ids}
+            reachable = lambda srch, k: any(srch.track_state(*c) is OK for c in own_cells[k])
             if not all(any(reachable(srch, k) for srch in searches) for k in near_ids):
                 if why is not None:
                     why.append("pin")       # no grid cell on a pin: a finer grid is needed, not pushing
