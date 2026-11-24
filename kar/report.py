@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass
 
 from .classify import Classification
-from .geometry import Seg, SegIndex, coupled_length
+from .geometry import Seg, SegIndex, coupled_length, point_seg_dist
 from .model import Board
 
 
@@ -37,7 +37,7 @@ class Report:
             parts = ", ".join(f"{a} {c['by_activity_mm'][a][g]:.0f}" for a in c["by_activity_mm"])
             L.append(f"| analog running within {g} mm of digital | {v:.1f} mm (weighted {c['weighted_mm'][g]:.1f}; {parts}) |")
         p = d["pairs"]
-        L += [f"| differential pairs | {len(p['items'])} (mismatch max {p['max_mismatch_mm']:.1f} mm, side-by-side {p['avg_parallel_pct']:.0f} %) |",
+        L += [f"| differential pairs | {len(p['items'])} (mismatch max {p['max_mismatch_mm']:.1f} mm, side-by-side {p['avg_parallel_pct']:.0f} %, away from pins {p['avg_parallel_away_pct']:.0f} %) |",
               f"| GND pads farther than {d['gnd']['limit_mm']} mm from a GND via | {len(d['gnd']['far'])} / {d['gnd']['pads']} |",
               f"| power nets narrower than {d['power']['min_width_mm']} mm | {len(d['power']['narrow'])} |", ""]
         worst = d["coupling"]["worst"][:15]
@@ -49,9 +49,12 @@ class Report:
                 L.append(f"| {w['net']} | {w['near'][0]:.1f} ({w['weighted'][0]:.1f}) | {w['near'][-1]:.1f} ({w['weighted'][-1]:.1f}) | {', '.join(w['aggressors'][:5])} |")
             L.append("")
         if p["items"]:
-            L += ["## Differential pairs", "", "| pair | length | mismatch | side-by-side |", "|---|---:|---:|---:|"]
+            L += ["## Differential pairs", "", "| pair | length | mismatch | side-by-side | away from pins |",
+                  "|---|---:|---:|---:|---:|"]
             for it in sorted(p["items"], key=lambda x: -x["mismatch_mm"]):
-                L.append(f"| {it['a']} / {it['b']} | {it['len_a']:.1f} / {it['len_b']:.1f} | {it['mismatch_mm']:.1f} | {it['parallel_pct']:.0f} % |")
+                aw = "-" if it["parallel_away_pct"] is None else f"{it['parallel_away_pct']:.0f} %"
+                L.append(f"| {it['a']} / {it['b']} | {it['len_a']:.1f} / {it['len_b']:.1f} | {it['mismatch_mm']:.1f} | "
+                         f"{it['parallel_pct']:.0f} % | {aw} |")
             L.append("")
         if d["gnd"]["far"]:
             L += ["## GND pads far from a via", "", "| pad | distance |", "|---|---:|"]
@@ -114,15 +117,34 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
     by_net: dict[str, list[Seg]] = {}
     for s in analog_segs:
         by_net.setdefault(s.net, []).append(s)
+    pads_by = board.pads_by_net()
     for a, b in cls.pairs:
         la, lb = alen.get(a, 0.0), alen.get(b, 0.0)
         idx_b = SegIndex(by_net.get(b, []), cell=2.0)
         par = sum(coupled_length(s, idx_b, 0.6)[0] for s in by_net.get(a, []))
+        # the same, leaving out the stretches next to the pins (pin positions decide those)
+        pins = pads_by.get(a, []) + pads_by.get(b, [])
+        free = free_par = 0.0
+        for sg in by_net.get(a, []):
+            n = max(1, int(sg.length / 0.25))
+            dl = sg.length / n
+            near_b = idx_b.near(sg.layer, sg.bbox(1.2))
+            for k in range(n):
+                t = (k + 0.5) / n
+                px, py = sg.x1 + t * (sg.x2 - sg.x1), sg.y1 + t * (sg.y2 - sg.y1)
+                if any(p.dist(px, py) < 2.0 for p in pins):
+                    continue
+                free += dl
+                if any(point_seg_dist(px, py, o.x1, o.y1, o.x2, o.y2) - (o.width + sg.width) / 2 <= 0.6 for o in near_b):
+                    free_par += dl
         items.append({"a": a, "b": b, "len_a": la, "len_b": lb, "mismatch_mm": abs(la - lb),
-                      "parallel_pct": 100.0 * par / la if la else 0.0})
+                      "parallel_pct": 100.0 * par / la if la else 0.0,
+                      "parallel_away_pct": 100.0 * free_par / free if free > 1.0 else None})
+    away = [i["parallel_away_pct"] for i in items if i["parallel_away_pct"] is not None]
     pairs = {"items": items,
              "max_mismatch_mm": max((i["mismatch_mm"] for i in items), default=0.0),
-             "avg_parallel_pct": sum(i["parallel_pct"] for i in items) / len(items) if items else 0.0}
+             "avg_parallel_pct": sum(i["parallel_pct"] for i in items) / len(items) if items else 0.0,
+             "avg_parallel_away_pct": sum(away) / len(away) if away else 100.0}
 
     # GND return: SMD pads of each ground net -> nearest via / THT pad of the same net (from the pad edge)
     from .ground import anchor_dist, anchors_by_net
@@ -170,7 +192,8 @@ def _score(board, summary, coupling, pairs, gnd, power) -> tuple[float, dict]:
     parts = {
         # share of analog length close to digital, weighted by aggressor activity (tight gap counts 3x)
         "coupling": 35 * math.exp(-(3 * g0 + g1) / alen * 10),
-        "pairs": 15 * (pairs["avg_parallel_pct"] / 100 if pairs["items"] else 1.0)
+        # side by side where the pins allow it (stretches next to the pins are left out)
+        "pairs": 15 * (pairs["avg_parallel_away_pct"] / 100 if pairs["items"] else 1.0)
                  * math.exp(-pairs["max_mismatch_mm"] / 50),
         "gnd": 20 * (1 - len(gnd["far"]) / gnd["pads"] if gnd["pads"] else 1.0),
         "power": 10 * (1.0 if not power["narrow"] else math.exp(-len(power["narrow"]) / 3)),

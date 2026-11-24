@@ -490,7 +490,7 @@ class _Search:
                 dy = max(b[1] - y, 0.0, y - b[3])
                 if dx * dx + dy * dy >= need * need:
                     continue
-            if _obj_dist(obj, x, y) < need - 1e-9:
+            if _obj_dist(obj, x, y) < need + 0.005:     # 5 um margin for arc approximation
                 if obj[2]:
                     return FIXED
                 if viol is None:

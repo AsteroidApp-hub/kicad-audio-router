@@ -38,12 +38,12 @@ stripped of all tracks and routed from scratch with `kar auto`, compared with th
 
 | board | layers | original | kar | time |
 |---|---|---|---|---|
-| monitor controller (~270 parts, relays, MUSES72320) | 4 | 53.2 | 75.4 | 291 s |
-| VU meter (USB-C) | 2 | 80.8 | 92.4 | 40 s |
-| tape saturator | 4 | 81.1 | 89.1 | 70 s |
+| monitor controller (~270 parts, relays, MUSES72320) | 4 | 53.4 | 78.6 | 233 s |
+| VU meter (USB-C) | 2 | 80.8 | 92.2 | 40 s |
+| tape saturator | 4 | 81.1 | 91.1 | 70 s |
 | P48 phantom supply | 4 | 82.5 | 85.0 | 32 s |
 | 2-ch mic preamp (discrete) | 4 | 79.6 | 82.5 | 38 s |
-| mic preamp (op-amp) | 2 | 78.5 | 81.1 | 97 s |
+| mic preamp (op-amp) | 2 | 78.5 | 81.0 | 97 s |
 | phantom power unit | 2 | 99.3 | 100.0 | 8 s |
 
 All boards fully routed with no DRC problems introduced by kar (only issues already present in the

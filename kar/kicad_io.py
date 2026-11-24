@@ -100,10 +100,12 @@ def _area(poly) -> float:
 
 
 def _pad_poly(p) -> list[tuple[float, float]] | None:
-    """Copper outline of a pad (first layer), or None if this KiCad version cannot give it."""
+    """Copper outline of a pad (first layer), or None if this KiCad version cannot give it.
+    Arcs are approximated on the outside (ERROR_OUTSIDE), so distances to it are never overestimated."""
     ps = None
-    for args in ((p.GetLayerSet().CuStack()[0] if p.GetLayerSet().CuStack() else pcbnew.F_Cu, pcbnew.ERROR_INSIDE),
-                 (pcbnew.ERROR_INSIDE,)):
+    err = getattr(pcbnew, "ERROR_OUTSIDE", pcbnew.ERROR_INSIDE)
+    for args in ((p.GetLayerSet().CuStack()[0] if p.GetLayerSet().CuStack() else pcbnew.F_Cu, err),
+                 (err,)):
         try:
             ps = p.GetEffectivePolygon(*args)
             break
