@@ -157,6 +157,10 @@ def cmd_route(args) -> int:
         prm.near_cost = args.near_cost
     if getattr(args, "near_mm", None) is not None:
         prm.near_mm = args.near_mm
+    if getattr(args, "near_static", None) is not None:
+        prm.near_min_weight = args.near_static
+    if getattr(args, "analog_via_cost", None) is not None:
+        prm.analog_via_cost = args.analog_via_cost
     if getattr(args, "h_digital", None) is not None:
         prm.h_weight = dict(prm.h_weight, digital=args.h_digital, other=args.h_digital)
     if args.layers:
@@ -419,6 +423,8 @@ def main(argv=None) -> int:
     r.add_argument("--near-cost", type=float, help="extra cost per step next to the other kind (default 3)")
     r.add_argument("--near-mm", type=float, help="reach of the analog/digital proximity cost (default 3 mm)")
     r.add_argument("--h-digital", type=float, help="A* greediness for digital/other nets (1 = optimal)")
+    r.add_argument("--near-static", type=float, help="routing: least weight with which digital nets avoid analog")
+    r.add_argument("--analog-via-cost", type=float, help="via cost for analog nets in grid steps (default 30)")
     r.add_argument("--fanout-dist", type=float, default=1.0,
                    help="before routing, ground pads without a ground via this close get one (default 1 mm)")
     r.add_argument("--json", action="store_true")

@@ -215,7 +215,8 @@ def _score(board, summary, coupling, pairs, gnd, power) -> tuple[float, dict]:
         "pairs": 15 * (pairs["avg_parallel_away_pct"] / 100 if pairs["items"] else 1.0)
                  * math.exp(-pairs["max_mismatch_mm"] / 50),
         "gnd": 20 * (1 - len(gnd["far"]) / gnd["pads"] if gnd["pads"] else 1.0),
-        "power": 10 * (1.0 if not power["narrow"] else math.exp(-len(power["narrow"]) / 3)),
+        # by how much narrow power track there is (a 0.6 mm neck is not a 20 mm bottleneck)
+        "power": 10 * math.exp(-sum(f.get("length_mm", 5.0) for f in power["narrow"]) / 30.0),
         "vias": 10 * math.exp(-summary["analog_vias"] / max(summary["analog"], 1) / 2),
         "routed": 10 * (1.0 if not board.unrouted else 0.0),
     }

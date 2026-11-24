@@ -46,6 +46,7 @@ class RouteParams:
     narrow_width: dict = field(default_factory=lambda: {"power": 0.3, "gnd": 0.25})   # where the wide one fails
     near_mm: float = 3.0              # reach of the proximity cost fields
     near_cost: float = 6.0            # extra cost per step right next to the other kind (falls off linearly)
+    near_min_weight: float = 0.0      # routing: digital nets avoid analog at least this much, however static
     pair_gap: float = 0.25            # target edge gap between the two sides of a pair
     pair_cost: float = 1.5            # extra cost per step for the second side away from the first
     pair_retry_below: float = 0.5     # if the sides run together less than this, try other orders/costs
@@ -478,7 +479,7 @@ class _Search:
         if kind == "analog":
             self.field, self.fw = g.near_dig, prm.near_cost
         elif kind == "digital":
-            self.field, self.fw = g.near_ana, prm.near_cost * act_w
+            self.field, self.fw = g.near_ana, prm.near_cost * max(act_w, prm.near_min_weight)
         else:
             self.field, self.fw = None, 0.0
         self.room = None                     # set for the first side of a pair: cost of crowded cells
