@@ -49,13 +49,15 @@ class RouteParams:
     pair_cost: float = 1.5            # extra cost per step for the second side away from the first
     window_mm: float = 12.0           # search window around the net, widened once on failure
     rip_rounds: int = 3               # rip-up and reroute rounds for nets that failed
+    max_expand: int = 400_000         # node budget per search (fail fast instead of flooding the board)
+    near_targets: int = 6             # heuristic looks at this many nearest remaining pads
     rip_radius: float = 2.0           # routed nets passing this close to a failed net's pads are ripped up
     rip_time_s: float = 300.0         # time budget for rip-up and reroute
     push_cost: float = 20.0           # per step through another net's track when pushing (digital/other)
     push_cost_analog: float = 60.0    # ... through an analog track
     push_limit: int = 4               # how many times one net may push others
     local_rip: bool = False           # also try ripping up everything near a failed net's pads first
-    h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.3, "digital": 1.3, "other": 1.3})
+    h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 2.0, "other": 2.0})
     # >1 makes A* greedier (much faster on long nets, paths slightly longer than optimal)
     layers: list[str] | None = None   # routing layers (default: copper minus plane layers)
     classes: tuple[str, ...] = ("analog", "power", "digital", "other")
@@ -403,94 +405,160 @@ class _Search:
 
     def run(self, sources: list[tuple[int, int, int]], targets: set[tuple[int, int, int]],
             tcenters: list[tuple[float, float]], window) -> list[tuple[int, int, int]] | None:
+        """A* with integer node ids (layer, x, y) -> (layer * H + y) * W + x and flat caches."""
         g, prm = self.g, self.prm
-        W = g.W
+        W, H, L = g.W, g.H, g.L
+        WH = W * H
         wx0, wy0, wx1, wy1 = window
-
         hw = self.hw
+        sq2m1 = SQ2 - 1
+        tc = tcenters
+        okc = self._okc if getattr(self, "_okc", None) is not None else bytearray(L * WH)   # 0 ?, 1 ok, 2 no
+        self._okc = okc
+        vic = self._vic if getattr(self, "_vic", None) is not None else bytearray(WH)
+        self._vic = vic
+        occ = g.occ
+        val = self.val
+        tdisk = self.track_disk
+        push = self.push
+        fields = self.field
+        fw = self.fw
+        pfs = self.pair_field
+        pair_cost = prm.pair_cost
+        bend = prm.bend_cost
+        via_cost = self.via_cost
+        tgt = {(li * H + y) * W + x for li, x, y in targets}
 
-        def h(cx, cy):
-            best = math.inf
-            for tx, ty in tcenters:
-                dx, dy = abs(cx - tx), abs(cy - ty)
-                d = max(dx, dy) + (SQ2 - 1) * min(dx, dy)
+        def h(x, y):
+            best = 1e18
+            for tx, ty in tc:
+                dx = x - tx if x > tx else tx - x
+                dy = y - ty if y > ty else ty - y
+                d = dx + sq2m1 * dy if dx > dy else dy + sq2m1 * dx
                 if d < best:
                     best = d
             return best * hw
 
-        gcost: dict[tuple[int, int, int], float] = {}
-        came: dict[tuple[int, int, int], tuple[tuple[int, int, int] | None, int]] = {}
+        def cell_ok(nid, li, x, y):
+            c = okc[nid]
+            if c:
+                return c == 1
+            o = occ[li]
+            r = 1
+            for dx, dy in tdisk:
+                xx, yy = x + dx, y + dy
+                if not (0 <= xx < W and 0 <= yy < H):
+                    r = 2
+                    break
+                v = o[yy * W + xx]
+                if v != 0 and v != val:
+                    r = 2
+                    break
+            okc[nid] = r
+            return r == 1
+
+        gcost: dict[int, float] = {}
+        came: dict[int, int] = {}
+        cdir: dict[int, int] = {}
         heap = []
         cnt = 0
-        for s in sources:
-            gcost[s] = 0.0
-            came[s] = (None, -1)
-            heapq.heappush(heap, (h(s[1], s[2]), cnt, s))
+        for li, x, y in sources:
+            nid = (li * H + y) * W + x
+            gcost[nid] = 0.0
+            came[nid] = -1
+            cdir[nid] = -1
+            heap.append((h(x, y), cnt, nid))
             cnt += 1
-        closed = set()
+        heapq.heapify(heap)
+        closed = bytearray(L * WH)
+        budget = prm.max_expand
+        pop, push_ = heapq.heappop, heapq.heappush
+        found = -1
         while heap:
-            _, _, cur = heapq.heappop(heap)
-            if cur in closed:
+            _, _, cur = pop(heap)
+            if closed[cur]:
                 continue
-            if cur in targets:
-                path = []
-                n = cur
-                while n is not None:
-                    path.append(n)
-                    n = came[n][0]
-                return path[::-1]
-            closed.add(cur)
-            li, cx, cy = cur
+            if cur in tgt:
+                found = cur
+                break
+            budget -= 1
+            if budget < 0:
+                return None
+            closed[cur] = 1
+            li, rem = divmod(cur, WH)
+            cy, cx = divmod(rem, W)
             gc = gcost[cur]
-            pdir = came[cur][1]
-            fld = self.field[li] if self.field is not None else None
-            pf = self.pair_field[li] if self.pair_field is not None else None
-            for d, (dx, dy, step) in enumerate(DIRS):
+            pdir = cdir[cur]
+            fld = fields[li] if fields is not None else None
+            pf = pfs[li] if pfs is not None else None
+            base = li * WH
+            for d in range(8):
+                dx, dy, step = DIRS[d]
                 nx, ny = cx + dx, cy + dy
-                if not (wx0 <= nx <= wx1 and wy0 <= ny <= wy1):
+                if nx < wx0 or nx > wx1 or ny < wy0 or ny > wy1:
                     continue
-                nxt = (li, nx, ny)
-                if nxt in closed:
+                i = ny * W + nx
+                nid = base + i
+                if closed[nid]:
                     continue
-                extra = 0.0
-                if not self.ok(li, nx, ny):
-                    if self.push is None:
+                c = step
+                if not cell_ok(nid, li, nx, ny):
+                    if push is None:
                         continue
                     pc = self.push_step(li, nx, ny)
                     if pc is None:
                         continue
-                    extra = pc * step
-                i = ny * W + nx
-                c = step + extra
+                    c += pc * step
                 if fld is not None:
-                    c += step * self.fw * fld[i]
+                    c += step * fw * fld[i]
                 if pf is not None:
-                    c += step * prm.pair_cost * (1.0 - pf[i])
+                    c += step * pair_cost * (1.0 - pf[i])
                 if pdir >= 0 and pdir != d:
-                    c += prm.bend_cost
+                    c += bend
                 ng = gc + c
-                if ng < gcost.get(nxt, math.inf):
-                    gcost[nxt] = ng
-                    came[nxt] = (cur, d)
-                    heapq.heappush(heap, (ng + h(nx, ny), cnt, nxt))
+                if ng < gcost.get(nid, 1e18):
+                    gcost[nid] = ng
+                    came[nid] = cur
+                    cdir[nid] = d
+                    push_(heap, (ng + h(nx, ny), cnt, nid))
                     cnt += 1
-            vextra = 0.0 if self.via_ok(cx, cy) else (self.push_via(cx, cy) if self.push is not None else None)
-            if g.L > 1 and vextra is not None:
-                if vextra:
-                    vextra *= 3
-                for lj in range(g.L):
+            if L > 1:
+                vk = vic[rem]
+                if vk == 0:
+                    vk = 1 if self.via_ok(cx, cy) else 2
+                    vic[rem] = vk
+                vextra = 0.0
+                if vk == 2:
+                    if push is None:
+                        continue
+                    pv = self.push_via(cx, cy)
+                    if pv is None:
+                        continue
+                    vextra = pv * 3
+                hh = h(cx, cy)
+                for lj in range(L):
                     if lj == li:
                         continue
-                    nxt = (lj, cx, cy)
-                    if nxt in closed:
+                    nid = lj * WH + rem
+                    if closed[nid]:
                         continue
-                    ng = gc + self.via_cost + vextra
-                    if ng < gcost.get(nxt, math.inf):
-                        gcost[nxt] = ng
-                        came[nxt] = (cur, -1)
-                        heapq.heappush(heap, (ng + h(cx, cy), cnt, nxt))
+                    ng = gc + via_cost + vextra
+                    if ng < gcost.get(nid, 1e18):
+                        gcost[nid] = ng
+                        came[nid] = cur
+                        cdir[nid] = -1
+                        push_(heap, (ng + hh, cnt, nid))
                         cnt += 1
-        return None
+        if found < 0:
+            return None
+        path = []
+        n = found
+        while n >= 0:
+            li, rem = divmod(n, WH)
+            y, x = divmod(rem, W)
+            path.append((li, x, y))
+            n = came[n]
+        return path[::-1]
 
 
 def _pad_cells(g: Grid, p: Pad) -> set[tuple[int, int, int]]:
@@ -566,12 +634,15 @@ def _pair_band(g: Grid, segs: list[Seg], width: float, prm: RouteParams) -> list
     return out
 
 
-def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width: float, prm: RouteParams,
+def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: RouteParams,
               pair_field=None, act_w: float = 1.0, push: dict[int, float] | None = None) -> RoutedNet | None:
+    """Grow a tree over the net's pads. `width` may be a list: each connection tries the widths in
+    order (e.g. a power net goes narrow only where the wide track does not fit)."""
+    widths = list(width) if isinstance(width, (list, tuple)) else [width]
     pads = sorted(board_pads, key=lambda p: (p.ref, p.number))
     if len(pads) < 2:
         return None
-    srch = _Search(g, net, kind, width, prm, pair_field, act_w, push)
+    searches = [_Search(g, net, kind, w, prm, pair_field, act_w, push) for w in widths]
     tree: set[tuple[int, int, int]] = set(_pad_cells(g, pads[0]))
     remaining = list(pads[1:])
     all_segs, all_vias = [], []
@@ -580,26 +651,40 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width: float,
         for k, p in enumerate(remaining):
             for c in _pad_cells(g, p):
                 targets.setdefault(c, k)
-        tcent = [g.cell(p.x, p.y) for p in remaining]
-        xs = [c[1] for c in tree] + [c[1] for c in targets]
-        ys = [c[2] for c in tree] + [c[2] for c in targets]
-        path = None
-        for grow in (prm.window_mm, prm.window_mm * 4):
-            m = int(grow / g.res)
-            win = (max(min(xs) - m, 0), max(min(ys) - m, 0), min(max(xs) + m, g.W - 1), min(max(ys) + m, g.H - 1))
-            path = srch.run(sorted(tree), set(targets), tcent, win)
+        xs = [c[1] for c in tree]
+        ys = [c[2] for c in tree]
+        tx0, tx1, ty0, ty1 = min(xs), max(xs), min(ys), max(ys)
+
+        def gap(p):
+            cx, cy = g.cell(p.x, p.y)
+            return max(tx0 - cx, 0, cx - tx1) + max(ty0 - cy, 0, cy - ty1)
+        near = sorted(remaining, key=gap)[:prm.near_targets]
+        tcent = [g.cell(p.x, p.y) for p in near]
+        near_ids = {remaining.index(p) for p in near}
+        # aim at the nearest pads first; the others stay valid targets
+        txs = xs + [c[1] for c, k in targets.items() if k in near_ids]
+        tys = ys + [c[2] for c, k in targets.items() if k in near_ids]
+        path, used_w = None, widths[0]
+        for srch, w in zip(searches, widths):
+            for grow in (prm.window_mm, prm.window_mm * 4):
+                m = int(grow / g.res)
+                win = (max(min(txs) - m, 0), max(min(tys) - m, 0), min(max(txs) + m, g.W - 1), min(max(tys) + m, g.H - 1))
+                path = srch.run(sorted(tree), set(targets), tcent, win)
+                if path:
+                    break
             if path:
+                used_w = w
                 break
         if not path:
             return None
-        segs, vias = _path_to_segs(g, path, net, width)
+        segs, vias = _path_to_segs(g, path, net, used_w)
         all_segs += segs
         all_vias += vias
         tree.update(path)
         hit = remaining[targets[path[-1]]]
         tree.update(_pad_cells(g, hit))
         remaining.remove(hit)
-    return RoutedNet(net, all_segs, all_vias, width)
+    return RoutedNet(net, all_segs, all_vias, widths[0])
 
 
 def _crossed(new: RoutedNet, done: dict[str, RoutedNet], prm: RouteParams) -> list[str]:
@@ -664,12 +749,11 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         if kind in prm.narrow_width:
             widths.append(prm.narrow_width[kind])
         pf = _pair_band(g, done[partner].segs, done[partner].width, prm) if partner in done else None
-        for w in widths:
-            res = route_net(g, pads, net, kind, w, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0))
-            if res:
-                _commit(g, net, kind, res.segs, res.vias, prm)
-                done[net] = res
-                return True
+        res = route_net(g, pads, net, kind, widths, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0))
+        if res:
+            _commit(g, net, kind, res.segs, res.vias, prm)
+            done[net] = res
+            return True
         return False
 
     todo = []

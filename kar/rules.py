@@ -23,19 +23,24 @@ import json
 DEFAULTS: dict = {
     "classes": {"analog": [], "digital": [], "power": [], "gnd": [], "ignore": []},
     "diff_pairs": [["_H", "_C"], ["_HOT", "_COLD"], ["_P", "_N"], ["+", "-"]],
+    # word pairs anywhere in the name, e.g. HOTL / COLDL, IN_POS_L / IN_NEG_L
+    "diff_pairs_word": [["HOT", "COLD"], ["POS", "NEG"]],
     # name patterns (regex, case-insensitive) used when nothing else decides
     "gnd_names": [r"^/?(A|D|P|S)?GND\d*$", r"^/?GND_", r"^/?CHASSIS$", r"^/?EARTH$", r"^/?VSS$", r"^/?0V$"],
     "power_names": [r"^/?[+-]\d+(\.\d+)?V", r"^/?[+-]?V(CC|DD|EE|IN|BAT|BUS)", r"^/?[+-]?\d+V\d*",
                     r"RAW$", r"^/?V\d+", r"_?V(CC|DD|EE)$"],
     "digital_names": [r"CLK|SCK|SCL|SDA|MOSI|MISO|SDATA|SDI|SDO|DATA$|LAT|LATCH|_CS$|^/?CS|_EN(_|$)|^/?EN|"
                       r"OE(_|$)|PGOOD|RESET|RST|^/?(UART_)?(TX|RX)D?\d*$|PWM|INT$|IRQ|SPI|I2C|UART|GPIO|LED"],
-    "analog_parts": [r"^OPA\d", r"^NE55", r"^NJM", r"^LM4562", r"^LME", r"^TL07", r"^AD8\d", r"^THAT",
-                     r"^INA\d", r"^MUSES", r"^PGA2", r"^BUF6", r"^LT1\d", r"^TPA6", r"^RC4580"],
+    "analog_parts": [r"^OPA\d", r"^NE55", r"^NJM(?!7[89])", r"^LM4562", r"^LME", r"^TL0[78]", r"^AD8\d",
+                     r"^AD7[0-9]{2}(?!\d)", r"^THAT", r"^INA\d", r"^MUSES", r"^PGA2", r"^BUF6", r"^LT1\d",
+                     r"^TPA6", r"^RC4580", r"^MCP60", r"^LM358", r"^LM324", r"^LM833", r"^JRC", r"^OP\d",
+                     r"^SSM2", r"^DRV13", r"^LM386", r"^TDA"],
     "digital_parts": [r"^74", r"^CD40", r"^ULN", r"^TPIC", r"^RP2040", r"^Pico", r"^ATmega", r"^ATtiny",
                       r"^STM32", r"^ESP32", r"^PIC", r"^SN74", r"^MCP23", r"^PCA9"],
     # footprint-name regex for audio connectors (seeds for analog)
     "audio_connectors": [r"Neutrik", r"XLR", r"Jack", r"TRS", r"RCA", r"Phone", r"Audio", r"Combo",
-                         r"NC3", r"NJ", r"NMJ", r"NRJ"],
+                         r"NC3", r"NJ", r"NMJ", r"NRJ", r"MIC", r"LINE", r"INPUT", r"OUTPUT", r"HEADPHONE",
+                         r"^(?!.*\bDC\b)(?!.*USB).*\b(IN|OUT)\b"],
     # pin-function regex on mixed-signal ICs: these pins are digital even on an analog IC
     "digital_pins": [r"CLK|SCK|SCL|SDA|DATA|SDI|SDO|LATCH|LAT|CS|^EN|RESET|RST|MUTE|ZC|DGND|DVDD|ADR|ADDR"],
     # activity of digital nets: how harmful it is to run next to analog copper.

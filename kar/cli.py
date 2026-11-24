@@ -4,6 +4,7 @@
   python -m kar report   BOARD.kicad_pcb [--rules R.json] [--out DIR] [--json]
   python -m kar route    BOARD.kicad_pcb [--classes analog,power,digital,other] [--nets A,B] [-o OUT]
   python -m kar finish   BOARD.kicad_pcb --jar freerouting.jar [--java java] [--passes 30] [-o OUT]
+  python -m kar auto     BOARD.kicad_pcb -o OUT.kicad_pcb [--out DIR]   # route + ground + DRC + report
   python -m kar strip    BOARD.kicad_pcb -o OUT.kicad_pcb            # remove tracks/vias (experiments)
   python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
@@ -149,6 +150,12 @@ def cmd_route(args) -> int:
     rules = R.load(args.rules)
     cls = classify(board, rules)
     prm = RouteParams(res=args.grid, clearance=args.clearance)
+    if getattr(args, "near_cost", None) is not None:
+        prm.near_cost = args.near_cost
+    if getattr(args, "near_mm", None) is not None:
+        prm.near_mm = args.near_mm
+    if getattr(args, "h_digital", None) is not None:
+        prm.h_weight = dict(prm.h_weight, digital=args.h_digital, other=args.h_digital)
     if args.layers:
         prm.layers = [l.strip() for l in args.layers.split(",")]
     prm.classes = tuple(c.strip() for c in args.classes.split(",") if c.strip())
@@ -225,6 +232,71 @@ def cmd_finish(args) -> int:
     return 0
 
 
+BENIGN_DRC = {"silk_overlap", "silk_edge_clearance", "silk_over_copper", "starved_thermal",
+              "text_height", "text_thickness", "lib_footprint_mismatch", "lib_footprint_issues"}
+
+
+def _kicad_cli() -> str | None:
+    import shutil
+    for c in (os.environ.get("KICAD_CLI"), shutil.which("kicad-cli"),
+              "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+              r"C:\Program Files\KiCad\9.0\bin\kicad-cli.exe", r"C:\Program Files\KiCad\10.0\bin\kicad-cli.exe"):
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+def run_drc(board: str, out_json: str) -> dict | None:
+    """KiCad DRC via kicad-cli. Returns counts split into problems and known-benign items."""
+    import collections
+    import subprocess
+    cli = _kicad_cli()
+    if not cli:
+        return None
+    subprocess.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "-o", out_json, board],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(out_json, encoding="utf-8") as f:
+        d = json.load(f)
+    types = collections.Counter(v["type"] for v in d.get("violations", []))
+    return {"problems": {k: v for k, v in types.items() if k not in BENIGN_DRC},
+            "benign": {k: v for k, v in types.items() if k in BENIGN_DRC},
+            "unconnected": len(d.get("unconnected_items", [])), "report": out_json}
+
+
+def cmd_auto(args) -> int:
+    import argparse as _ap
+    import time
+    t0 = time.time()
+    out = args.output
+    outdir = args.out or os.path.join(os.path.dirname(os.path.abspath(out)), "kar_out")
+    os.makedirs(outdir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(out))[0]
+    routed = os.path.join(outdir, stem + "_routed.kicad_pcb")
+    ns = _ap.Namespace(board=args.board, output=routed, rules=args.rules, classes=args.classes, nets=None,
+                       layers=args.layers, grid=args.grid, clearance=args.clearance, no_lock=args.no_lock,
+                       no_fanout=False, fanout_dist=1.0, json=True)
+    rc_route = cmd_route(ns)
+    from . import kicad_io
+    from .classify import classify
+    board, _ = kicad_io.load(routed)
+    gnd = ",".join(classify(board, R.load(args.rules)).nets_of("gnd"))
+    if gnd:
+        cmd_ground(_ap.Namespace(board=routed, output=out, net=gnd, pour=args.pour, pour_clearance=0.3,
+                                 max_dist=3.0, max_radius=6.0, via=0.6, drill=0.3, clearance=args.clearance))
+    else:
+        import shutil
+        shutil.copy(routed, out)
+    drc = run_drc(out, os.path.join(outdir, stem + "_drc.json"))
+    cmd_report(_ap.Namespace(board=out, rules=args.rules, out=outdir, json=True))
+    with open(os.path.join(outdir, stem + "_quality.json"), encoding="utf-8") as f:
+        q = json.load(f)
+    summary = {"saved": out, "drc": drc, "score": q["score"], "unrouted": q["unrouted"],
+               "seconds": round(time.time() - t0, 1), "outputs": outdir}
+    print(json.dumps(summary, ensure_ascii=False, indent=1))
+    ok = rc_route == 0 and (drc is None or (not drc["problems"] and drc["unconnected"] == 0))
+    return 0 if ok else 2
+
+
 def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
@@ -258,6 +330,9 @@ def main(argv=None) -> int:
     r.add_argument("--clearance", type=float, default=0.2)
     r.add_argument("--no-lock", action="store_true", help="do not lock the new tracks")
     r.add_argument("--no-fanout", action="store_true", help="do not place ground vias before routing")
+    r.add_argument("--near-cost", type=float, help="extra cost per step next to the other kind (default 3)")
+    r.add_argument("--near-mm", type=float, help="reach of the analog/digital proximity cost (default 3 mm)")
+    r.add_argument("--h-digital", type=float, help="A* greediness for digital/other nets (1 = optimal)")
     r.add_argument("--fanout-dist", type=float, default=1.0,
                    help="before routing, ground pads without a ground via this close get one (default 1 mm)")
     r.add_argument("--json", action="store_true")
@@ -272,6 +347,18 @@ def main(argv=None) -> int:
     fz.add_argument("--timeout", type=int, default=3600)
     fz.add_argument("--route-ground", action="store_true", help="also let Freerouting route ground nets")
     fz.set_defaults(fn=cmd_finish)
+    a = sub.add_parser("auto", help="route + ground + DRC + quality report in one go")
+    a.add_argument("board")
+    a.add_argument("-o", "--output", required=True)
+    a.add_argument("--out", help="directory for intermediate files and reports (default: <output dir>/kar_out)")
+    a.add_argument("--rules")
+    a.add_argument("--classes", default="analog,power,digital,other")
+    a.add_argument("--layers")
+    a.add_argument("--pour", default="", help="pour the ground net on these layers first, e.g. F.Cu,B.Cu")
+    a.add_argument("--grid", type=float, default=0.25)
+    a.add_argument("--clearance", type=float, default=0.2)
+    a.add_argument("--no-lock", action="store_true")
+    a.set_defaults(fn=cmd_auto)
     st = sub.add_parser("strip", help="remove tracks and vias")
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)

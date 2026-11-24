@@ -156,6 +156,25 @@ def test_drop_nets():
     assert out.count("(") == out.count(")")
 
 
+def test_part_kind_house_styles():
+    from kar.classify import part_kind
+    from kar.model import Footprint
+    assert part_kind(Footprint("RGaR", "10k", "R_0805")) == "R"
+    assert part_kind(Footprint("DBL", "1N4148", "D_SOD-123")) == "D"
+    assert part_kind(Footprint("RLL", "HFD27/024-S", "Relay_DPDT")) == "K"
+    assert part_kind(Footprint("JINL", "", "XLR")) == "J"
+    assert part_kind(Footprint("IC3", "NE5532", "SOIC-8")) == "U"
+    assert part_kind(Footprint("SW1", "GAIN", "Rotary")) == "SW"
+
+
+def test_word_pairs():
+    from kar.classify import find_pairs
+    kind = {"HOTL": "analog", "COLDL": "analog", "IN_POS": "analog", "IN_NEG": "analog", "HOTR": "analog"}
+    pairs = find_pairs(kind, R.load(None))
+    assert ("HOTL", "COLDL") in pairs and ("IN_POS", "IN_NEG") in pairs
+    assert not any("HOTR" in p for p in pairs)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
