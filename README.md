@@ -18,7 +18,7 @@ and measures (and, in later versions, improves) the routing with audio in mind.
 | net classification (analog / digital / power / gnd, differential pairs) | ✅ v0.1 |
 | routing quality report (Markdown + JSON, 0–100 score) | ✅ v0.1 |
 | audio pre-router (analog nets, pairs side by side, away from digital) | planned |
-| ground handling (pours, stitching / fan-out vias, island repair) | planned |
+| ground handling (pours, fan-out vias, island repair) | ✅ v0.1 |
 | hand-off of the remaining nets to Freerouting (DSN/SES) | planned |
 
 ## Usage
@@ -33,15 +33,24 @@ KPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/
 $KPY -m kar classify board.kicad_pcb                 # how each net was classified, and why
 $KPY -m kar report   board.kicad_pcb --out out/      # writes board_quality.md / .json
 $KPY -m kar report   board.kicad_pcb --json          # score only, for scripts
+$KPY -m kar ground   board.kicad_pcb --net GND,/CHASSIS -o out.kicad_pcb
+                                                     # vias for ground pads far from one, island repair
+$KPY -m kar ground   board.kicad_pcb --pour F.Cu,B.Cu   # also pour GND on the outer layers first
 ```
+
+`ground` works on a routed board. For every SMD pad of the ground net(s) with no via / through-hole pad
+of the same net within `--max-dist` (3 mm, measured from the pad edge) it adds a short track and a via,
+searching outwards from the pad (away from the part body first) and keeping clearance to all other copper
+on every layer. Pour islands that reach no via / through-hole pad get one via at their deepest point.
+Always run KiCad's DRC afterwards.
 
 ### What the report measures
 
 | metric | meaning |
 |---|---|
-| coupling | analog copper running within 1 mm / 3 mm (edge to edge, same layer) of digital copper |
+| coupling | analog copper running within 1 mm / 3 mm (edge to edge, same layer) of digital copper, weighted by how active the digital net is (clock 1.0, data 0.6, static 0.15) |
 | differential pairs | length of each side, mismatch, share routed side by side |
-| ground return | SMD ground pads farther than 3 mm from a ground via or through-hole ground pad |
+| ground return | SMD pads of each ground net farther than 3 mm (from the pad edge) from a via / through-hole pad of the same net |
 | power width | power nets with tracks narrower than the limit |
 | analog vias | vias on analog nets |
 | unrouted | unconnected items reported by KiCad |

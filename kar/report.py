@@ -124,18 +124,18 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
              "max_mismatch_mm": max((i["mismatch_mm"] for i in items), default=0.0),
              "avg_parallel_pct": sum(i["parallel_pct"] for i in items) / len(items) if items else 0.0}
 
-    # GND return: SMD GND pads -> nearest GND via / THT GND pad
+    # GND return: SMD pads of each ground net -> nearest via / THT pad of the same net (from the pad edge)
+    from .ground import anchor_dist, anchors_by_net
     gnd_nets = {n for n, k in kind.items() if k == "gnd"}
-    anchors = [(v.x, v.y) for v in board.vias if v.net in gnd_nets]
-    anchors += [(p.x, p.y) for fp in board.footprints for p in fp.pads if p.net in gnd_nets and not p.smd]
+    anchors = anchors_by_net(board, gnd_nets)
     far, npads = [], 0
     for fp in board.footprints:
         for p in fp.pads:
             if p.net in gnd_nets and p.smd:
                 npads += 1
-                d = min((math.hypot(p.x - x, p.y - y) for x, y in anchors), default=math.inf)
+                d = anchor_dist(p, anchors.get(p.net, []))
                 if d > m["gnd_via_max_mm"]:
-                    far.append({"pad": f"{p.ref}.{p.number}", "dist_mm": round(d, 2)})
+                    far.append({"pad": f"{p.ref}.{p.number}", "net": p.net, "dist_mm": round(d, 2)})
     far.sort(key=lambda f: -f["dist_mm"])
     gnd = {"limit_mm": m["gnd_via_max_mm"], "pads": npads, "far": far}
 

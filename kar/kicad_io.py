@@ -41,8 +41,10 @@ def from_pcbnew(kb, source: str = "") -> Board:
             layers = tuple(kb.GetLayerName(l) for l in p.GetLayerSet().CuStack())
             pf = p.GetPinFunction() if hasattr(p, "GetPinFunction") else ""
             pt = p.GetPinType() if hasattr(p, "GetPinType") else ""
+            bb = p.GetBoundingBox()
             f.pads.append(Pad(fp.GetReference(), p.GetNumber(), p.GetNetname(), _mm(pos.x), _mm(pos.y),
-                              p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD, layers, pf, pt))
+                              p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD, layers, pf, pt,
+                              (_mm(bb.GetLeft()), _mm(bb.GetTop()), _mm(bb.GetRight()), _mm(bb.GetBottom()))))
         fps.append(f)
     segs, vias = [], []
     for t in kb.GetTracks():
@@ -61,7 +63,20 @@ def from_pcbnew(kb, source: str = "") -> Board:
             continue
         for l in z.GetLayerSet().CuStack():
             zones.append((z.GetNetname(), kb.GetLayerName(l)))
-    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source)
+    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb))
+
+
+def _outline(kb) -> list[list[tuple[float, float]]]:
+    ps = pcbnew.SHAPE_POLY_SET()
+    try:
+        kb.GetBoardPolygonOutlines(ps)
+    except TypeError:
+        kb.GetBoardPolygonOutlines(ps, False)
+    out = []
+    for i in range(ps.OutlineCount()):
+        o = ps.Outline(i)
+        out.append([(_mm(o.CPoint(k).x), _mm(o.CPoint(k).y)) for k in range(o.PointCount())])
+    return out
 
 
 def _unrouted(kb) -> int | None:
@@ -76,3 +91,102 @@ def _unrouted(kb) -> int | None:
     except Exception:   # noqa: BLE001
         return None
     return None
+
+
+# ---------------------------------------------------------------- writing
+
+def _from_mm(v: float) -> int:
+    return pcbnew.FromMM(v)
+
+
+def layer_id(kb, name: str) -> int:
+    lid = kb.GetLayerID(name)
+    if lid < 0:
+        raise ValueError(f"unknown layer {name}")
+    return lid
+
+
+def add_pour(kb, net: str, layer: str, outline: list[tuple[float, float]], *, name: str = "",
+             clearance: float = 0.3, min_width: float = 0.25, priority: int = 0,
+             tht_thermal: bool = True, inset: float = 0.3):
+    """Pour `net` on `layer` over the board outline (shrunk by `inset`). SMD pads connect solid,
+    through-hole pads with thermal spokes when tht_thermal."""
+    z = pcbnew.ZONE(kb)
+    z.SetLayer(layer_id(kb, layer))
+    z.SetNet(kb.FindNet(net))
+    z.SetZoneName(name or f"{net}_{layer.split('.')[0]}")
+    ps = pcbnew.SHAPE_POLY_SET()
+    ps.NewOutline()
+    for x, y in outline:
+        ps.Append(_from_mm(x), _from_mm(y))
+    if inset:
+        try:
+            ps.Inflate(-_from_mm(inset), pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS, _from_mm(0.01))
+        except Exception:   # noqa: BLE001  (API differs between KiCad versions)
+            try:
+                ps.Inflate(-_from_mm(inset), 16)
+            except Exception:   # noqa: BLE001
+                pass
+    z.Outline().RemoveAllContours()
+    for i in range(ps.OutlineCount()):
+        z.Outline().AddOutline(ps.Outline(i))
+    z.SetLocalClearance(_from_mm(clearance))
+    z.SetMinThickness(_from_mm(min_width))
+    z.SetThermalReliefGap(_from_mm(0.3))
+    z.SetThermalReliefSpokeWidth(_from_mm(0.4))
+    z.SetAssignedPriority(priority)
+    for setter, val in (("SetIslandRemovalMode", "ISLAND_REMOVAL_MODE_ALWAYS"),
+                        ("SetPadConnection", "ZONE_CONNECTION_THT_THERMAL" if tht_thermal else "ZONE_CONNECTION_FULL")):
+        try:
+            getattr(z, setter)(getattr(pcbnew, val))
+        except Exception:   # noqa: BLE001
+            pass
+    kb.Add(z)
+    return z
+
+
+def refill(kb) -> None:
+    pcbnew.ZONE_FILLER(kb).Fill(kb.Zones())
+
+
+def islands(kb, net: str, layer: str) -> list[list[tuple[float, float]]]:
+    """Filled-copper islands of `net` on `layer` (outer contours, mm)."""
+    lid = layer_id(kb, layer)
+    out = []
+    for z in kb.Zones():
+        if z.GetIsRuleArea() or z.GetNetname() != net or not z.IsOnLayer(lid):
+            continue
+        poly = z.GetFilledPolysList(lid)
+        for i in range(poly.OutlineCount()):
+            o = poly.Outline(i)
+            out.append([(_mm(o.CPoint(k).x), _mm(o.CPoint(k).y)) for k in range(o.PointCount())])
+    return out
+
+
+def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float) -> int:
+    n = kb.FindNet(net)
+    for p in plans:
+        v = pcbnew.PCB_VIA(kb)
+        v.SetPosition(pcbnew.VECTOR2I(_from_mm(p.x), _from_mm(p.y)))
+        v.SetDrill(_from_mm(drill))
+        try:
+            v.SetWidth(pcbnew.F_Cu, _from_mm(via_d))
+        except TypeError:
+            v.SetWidth(_from_mm(via_d))
+        v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        v.SetNet(n)
+        kb.Add(v)
+        if p.track:
+            x1, y1, x2, y2, layer = p.track
+            t = pcbnew.PCB_TRACK(kb)
+            t.SetStart(pcbnew.VECTOR2I(_from_mm(x1), _from_mm(y1)))
+            t.SetEnd(pcbnew.VECTOR2I(_from_mm(x2), _from_mm(y2)))
+            t.SetWidth(_from_mm(track_w))
+            t.SetLayer(layer_id(kb, layer))
+            t.SetNet(n)
+            kb.Add(t)
+    return len(plans)
+
+
+def save(kb, path: str) -> None:
+    pcbnew.SaveBoard(path, kb)

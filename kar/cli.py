@@ -2,6 +2,7 @@
 
   python -m kar classify BOARD.kicad_pcb [--rules R.json]          # how nets were classified
   python -m kar report   BOARD.kicad_pcb [--rules R.json] [--out DIR] [--json]
+  python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
 Run with KiCad's bundled Python (needs pcbnew).
 """
@@ -63,6 +64,51 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_ground(args) -> int:
+    from . import kicad_io
+    from .ground import GroundParams, Obstacles, plan_fanout, plan_islands
+    from .model import Via
+    _, kb = kicad_io.load(args.board)
+    nets = [n.strip() for n in args.net.split(",") if n.strip()]
+    results, bad = [], False
+    for net in nets:
+        prm = GroundParams(net=net, max_dist=args.max_dist, via_d=args.via, via_drill=args.drill,
+                           clearance=args.clearance, max_radius=args.max_radius)
+        if kb.FindNet(net) is None:
+            raise SystemExit(f"net {net!r} not found")
+        res = {"net": net, "pours_added": [], "fanout_vias": 0, "fanout_failed": [], "island_vias": 0,
+               "islands_failed": 0}
+        model = kicad_io.from_pcbnew(kb, args.board)
+        if args.pour and net == nets[0]:          # pours only for the first (main ground) net
+            have = {(n, l) for n, l in model.zones}
+            for layer in [l.strip() for l in args.pour.split(",") if l.strip()]:
+                if (net, layer) in have:
+                    continue
+                for poly in model.outline:
+                    kicad_io.add_pour(kb, net, layer, poly, clearance=args.pour_clearance)
+                res["pours_added"].append(layer)
+        kicad_io.refill(kb)
+        model = kicad_io.from_pcbnew(kb, args.board)
+        plans, failed = plan_fanout(model, prm, Obstacles(model))
+        res["fanout_vias"] = kicad_io.apply_vias(kb, plans, net, prm.via_d, prm.via_drill, prm.track_w)
+        res["fanout_failed"] = failed
+        kicad_io.refill(kb)
+        model = kicad_io.from_pcbnew(kb, args.board)
+        obst = Obstacles(model)
+        for layer in sorted({l for n, l in model.zones if n == net}):
+            iplans, ifail = plan_islands(model, kicad_io.islands(kb, net, layer), prm, obst)
+            res["island_vias"] += kicad_io.apply_vias(kb, iplans, net, prm.via_d, prm.via_drill, prm.track_w)
+            res["islands_failed"] += ifail
+            model.vias += [Via(p.x, p.y, net, prm.via_d, prm.via_drill) for p in iplans]   # seen by next layer
+        kicad_io.refill(kb)
+        bad |= bool(failed or res["islands_failed"])
+        results.append(res)
+    out = args.output or args.board
+    kicad_io.save(kb, out)
+    print(json.dumps({"saved": out, "nets": results}, ensure_ascii=False, indent=1))
+    return 2 if bad else 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="kar", description="kicad-audio-router: audio-aware routing helpers for KiCad")
     ap.add_argument("--version", action="version", version=__version__)
@@ -76,6 +122,18 @@ def main(argv=None) -> int:
         if name == "report":
             p.add_argument("--out", help="write <board>_quality.json / .md here")
         p.set_defaults(fn=fn)
+    g = sub.add_parser("ground", help="ground pours, fan-out vias and island repair")
+    g.add_argument("board")
+    g.add_argument("-o", "--output", help="write here instead of overwriting the board")
+    g.add_argument("--net", default="GND", help="ground net(s), comma-separated, e.g. GND,/CHASSIS")
+    g.add_argument("--pour", default="", help="comma-separated layers to pour the first net on, e.g. F.Cu,B.Cu")
+    g.add_argument("--pour-clearance", type=float, default=0.3)
+    g.add_argument("--max-dist", type=float, default=3.0, help="pads with a ground via this close are left alone")
+    g.add_argument("--max-radius", type=float, default=6.0, help="how far from a pad to search for a via site")
+    g.add_argument("--via", type=float, default=0.6, help="via diameter")
+    g.add_argument("--drill", type=float, default=0.3)
+    g.add_argument("--clearance", type=float, default=0.2)
+    g.set_defaults(fn=cmd_ground)
     args = ap.parse_args(argv)
     return args.fn(args)
 

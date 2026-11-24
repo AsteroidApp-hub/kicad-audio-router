@@ -18,6 +18,10 @@ class Pad:
     layers: tuple[str, ...]          # copper layers the pad is on, e.g. ("F.Cu",) or all for THT
     pin_function: str = ""           # pin name from the schematic, if any
     pin_type: str = ""               # electrical type from the schematic, if any
+    bbox: tuple[float, float, float, float] | None = None   # copper extent (x0, y0, x1, y1)
+
+    def box(self) -> tuple[float, float, float, float]:
+        return self.bbox or (self.x - 0.3, self.y - 0.3, self.x + 0.3, self.y + 0.3)
 
 
 @dataclass
@@ -50,6 +54,7 @@ class Board:
     zones: list[tuple[str, str]] = field(default_factory=list)   # (net, layer) of filled zones
     unrouted: int | None = None
     source: str = ""
+    outline: list[list[tuple[float, float]]] = field(default_factory=list)   # board outline polygon(s)
 
     @property
     def nets(self) -> set[str]:

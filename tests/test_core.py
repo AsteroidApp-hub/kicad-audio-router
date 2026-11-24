@@ -77,6 +77,40 @@ def test_report():
     assert 0 <= rep["score"] <= 100
 
 
+def _ground_board():
+    from kar.model import Board, Footprint, Pad
+    sq = [(0, 0), (40, 0), (40, 40), (0, 40)]
+    c1 = Footprint("C1", "100n", "C_0805", [
+        Pad("C1", "1", "/V", 20.0, 20.0, True, ("F.Cu",), bbox=(19.5, 19.4, 20.5, 20.6)),
+        Pad("C1", "2", "GND", 21.9, 20.0, True, ("F.Cu",), bbox=(21.4, 19.4, 22.4, 20.6))])
+    # a signal track hugging the right of the GND pad on every layer would block the via; leave room below
+    segs = [S(23.4, 15, 23.4, 25, "/SIG", layer=l) for l in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu")]
+    return Board([c1], segs, [], ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], outline=[sq])
+
+
+def test_ground_fanout():
+    from kar.ground import GroundParams, Obstacles, plan_fanout, _box_dist
+    b = _ground_board()
+    plans, failed = plan_fanout(b, GroundParams())
+    assert not failed and len(plans) == 1
+    v = plans[0]
+    assert v.pad == "C1.2" and v.track[4] == "F.Cu"
+    # clearance to the signal track (x=23.4, w=0.2) and to the other pad
+    assert abs(v.x - 23.4) - 0.1 - 0.3 >= 0.2 - 1e-9 or not (15 <= v.y <= 25)
+    assert _box_dist((19.5, 19.4, 20.5, 20.6), v.x, v.y) - 0.3 >= 0.2 - 1e-9
+    # a second run with the new via present needs nothing
+    from kar.model import Via
+    b.vias.append(Via(v.x, v.y, "GND", 0.6, 0.3))
+    assert plan_fanout(b, GroundParams())[0] == []
+
+
+def test_island_anchor_in_thermal_hole():
+    from kar.ground import island_anchored
+    ring_cut = [(0, 0), (3, 0), (3, 3), (0, 3)]          # island whose outline does not contain the pad
+    assert island_anchored(ring_cut, [(3.6, 1.5, 0.8)])   # THT pad just outside, inside tolerance
+    assert not island_anchored(ring_cut, [(6.0, 1.5, 0.8)])
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
