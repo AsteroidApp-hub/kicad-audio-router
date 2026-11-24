@@ -47,6 +47,7 @@ class RouteParams:
     near_cost: float = 6.0            # extra cost per step right next to the other kind (falls off linearly)
     pair_gap: float = 0.25            # target edge gap between the two sides of a pair
     pair_cost: float = 1.5            # extra cost per step for the second side away from the first
+    pair_retry_below: float = 0.5     # if the sides run together less than this, try other orders/costs
     window_mm: float = 12.0           # search window around the net, widened once on failure
     rip_rounds: int = 3               # rip-up and reroute rounds for nets that failed
     max_expand: int = 400_000         # node budget per search (fail fast instead of flooding the board)
@@ -763,7 +764,50 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             skipped.append(net)
         else:
             todo.append((net, partner))
-    for net, partner in todo:
+    def together(a: RoutedNet, b: RoutedNet) -> float:
+        from .geometry import SegIndex, coupled_length
+        la = sum(s.length for s in a.segs) or 1.0
+        idx = SegIndex(b.segs, cell=2.0)
+        return sum(coupled_length(s, idx, 0.6)[0] for s in a.segs) / la
+
+    def pair_attempt(g0, a, b):
+        """Route both sides of a pair; if they do not run together, try a stronger pull and the other
+        order, keep the best. Returns (grid, ok_a, ok_b)."""
+        best = None
+        variants = [((a, b), prm.pair_cost), ((a, b), prm.pair_cost * 3), ((b, a), prm.pair_cost * 2)]
+        for k, ((first, second), pc) in enumerate(variants):
+            g1 = g0.clone()
+            saved = prm.pair_cost
+            prm.pair_cost = pc
+            ok1 = attempt(g1, first, None)
+            ok2 = attempt(g1, second, first) if ok1 else False
+            prm.pair_cost = saved
+            r1, r2 = done.pop(first, None), done.pop(second, None)
+            score = (int(ok1) + int(ok2), together(r1, r2) if ok1 and ok2 else 0.0)
+            if best is None or score > best[0]:
+                best = (score, g1, {first: r1, second: r2})
+            if score[0] == 2 and score[1] >= prm.pair_retry_below:
+                break
+        _, g1, res = best
+        for n, r in res.items():
+            if r is not None:
+                done[n] = r
+        return g1, res[a] is not None, res[b] is not None
+
+    handled = set()
+    for k, (net, partner) in enumerate(todo):
+        if net in handled:
+            continue
+        nxt = todo[k + 1] if k + 1 < len(todo) else None
+        if partner is None and nxt is not None and nxt[1] == net:
+            g, ok_a, ok_b = pair_attempt(g, net, nxt[0])
+            handled.add(nxt[0])
+            for n, ok in ((net, ok_a), (nxt[0], ok_b)):
+                if not ok:
+                    failed.append(n)
+                if progress:
+                    progress(n, ok)
+            continue
         ok = attempt(g, net, partner)
         if not ok:
             failed.append(net)
