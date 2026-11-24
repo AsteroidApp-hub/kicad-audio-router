@@ -13,6 +13,18 @@ KiCad 用の、音響機器向け自動配線ツールと配線チェックツ�
 
 KiCad に付いている `pcbnew` モジュールの上で動く、純粋な Python です (KiCad 8〜10)。Java も追加のパッケージも要りません。同じ基板と同じルールからは、必ず同じ結果が出ます。結果は JSON でも出せるので、スクリプトや AI を使った設計の流れに組み込めます。
 
+## 試し方
+
+```sh
+$KPY examples/make_demo.py                                   # examples/demo_receiver.kicad_pcb を作る
+$KPY -m kar auto examples/demo_receiver.kicad_pcb -o out/demo.kicad_pcb
+$KPY -m kar plot out/demo.kicad_pcb -o out/demo.svg
+```
+
+見本は XLR 入力と OPA1612 のバランス受けの横に、74HC595 で LED を点ける回路を置いた基板です。74HC595 を動かす線は、アナログの回路の脇を通らないと届かない配置にしてあります。配線は約 4 秒で終わります。
+
+![kar で配線した見本基板](docs/demo_routed.svg)
+
 ## これまでの結果
 
 実際の音響機器の基板 7 枚 (モニターコントローラー、マイクプリ、ファンタム電源、VU メーター、テープサチュレーター) から線をすべて消し、`kar auto` で一から配線し直しました。元の配線 (手配線または Freerouting) と比べた結果です。点数は `kar report` の値です (0〜100、高いほど良い)。
@@ -55,6 +67,7 @@ $KPY -m kar report   board.kicad_pcb --out out/              # 品質レポー�
 | `report` | 配線品質のレポートと点数 |
 | `classify` | ネットの分類と、その理由 |
 | `bench DIR` | フォルダ内の基板をすべて引き直し、元の配線と比べる |
+| `plot` | 配線の図を SVG で書き出す。層ごとに並べ、線をネットの種類で色分けする |
 | `strip` | 線とビアを消す |
 | `finish` | 任意。kar が引けなかったネットを Freerouting に渡す (DSN/SES)。今のところ使う場面は無い |
 
@@ -93,6 +106,7 @@ $KPY -m kar report   board.kicad_pcb --out out/              # 品質レポー�
 
 ```sh
 python3 tests/test_core.py        # 中心部分のテスト (KiCad 不要)
+python3 tests/test_kicad.py       # KiCad で見本基板を作って配線する (KiCad が無ければ飛ばす)
 $KPY -m kar bench path/to/boards  # 手元の基板をまとめて引き直して、結果が悪くなっていないかを確かめる
 ```
 

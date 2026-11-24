@@ -17,6 +17,19 @@ board, works out which nets are analog / digital / power / ground, and routes it
 It is pure Python on top of KiCad's own `pcbnew` module (KiCad 8–10): no Java, no extra packages,
 deterministic (same board + rules = same result), with JSON output for scripted or AI-driven flows.
 
+## Try it
+
+```sh
+$KPY examples/make_demo.py                                   # builds examples/demo_receiver.kicad_pcb
+$KPY -m kar auto examples/demo_receiver.kicad_pcb -o out/demo.kicad_pcb
+$KPY -m kar plot out/demo.kicad_pcb -o out/demo.svg
+```
+
+The demo is a balanced line receiver (XLR, OPA1612) next to a 74HC595 LED driver whose control lines have
+to get past the analog path. Routed in about 4 s:
+
+![demo board routed by kar](docs/demo_routed.svg)
+
 ## Results so far
 
 Seven real audio boards (monitor controller, mic preamps, phantom supplies, VU meter, tape saturator),
@@ -63,6 +76,7 @@ if you want to start over. Always review the result in KiCad and run its DRC bef
 | `report` | routing quality report and score |
 | `classify` | net classification with reasons |
 | `bench DIR` | strips and re-routes every board in a folder, compares with the original routing |
+| `plot` | SVG picture of the routing, one panel per layer, tracks coloured by net class |
 | `strip` | removes tracks and vias |
 | `finish` | optional: hands nets kar could not route to Freerouting (DSN/SES); not needed so far |
 
@@ -113,6 +127,7 @@ Override anything with a rules file (`--rules rules.json`, see `examples/rules.e
 
 ```sh
 python3 tests/test_core.py        # core tests, no KiCad needed
+python3 tests/test_kicad.py       # builds and routes the demo board with KiCad (skipped without KiCad)
 $KPY -m kar bench path/to/boards  # regression run on a folder of your own boards
 ```
 

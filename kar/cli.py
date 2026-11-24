@@ -6,6 +6,7 @@
   python -m kar finish   BOARD.kicad_pcb --jar freerouting.jar [--java java] [--passes 30] [-o OUT]
   python -m kar auto     BOARD.kicad_pcb -o OUT.kicad_pcb [--out DIR]   # route + ground + DRC + report
   python -m kar bench    DIR [--out OUTDIR]          # strip + auto every board in DIR, compare with original
+  python -m kar plot     BOARD.kicad_pcb -o OUT.svg                  # picture of the routing by net class
   python -m kar strip    BOARD.kicad_pcb -o OUT.kicad_pcb            # remove tracks/vias (experiments)
   python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
@@ -363,6 +364,16 @@ def cmd_bench(args) -> int:
     return 0
 
 
+def cmd_plot(args) -> int:
+    from .plot import svg
+    board, rules, cls = _load(args)
+    layers = [l.strip() for l in args.layers.split(",")] if args.layers else None
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(svg(board, cls, layers, title=args.title or ""))
+    print(json.dumps({"saved": args.output}))
+    return 0
+
+
 def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
@@ -430,6 +441,13 @@ def main(argv=None) -> int:
     bn.add_argument("--out")
     bn.add_argument("--jobs", type=int, default=4)
     bn.set_defaults(fn=cmd_bench)
+    pl = sub.add_parser("plot", help="SVG picture of the routing, tracks coloured by net class")
+    pl.add_argument("board")
+    pl.add_argument("-o", "--output", required=True)
+    pl.add_argument("--rules")
+    pl.add_argument("--layers", help="layers to draw (default: routing layers)")
+    pl.add_argument("--title")
+    pl.set_defaults(fn=cmd_plot)
     st = sub.add_parser("strip", help="remove tracks and vias")
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)
