@@ -941,18 +941,23 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
                 if why is not None:
                     why.append("pin")       # no grid cell on a pin: a finer grid is needed, not pushing
                 return None
-        for srch, w in zip(searches, widths):
-            # start only where this track width keeps its clearance (a wide track starting at a pad's
-            # edge cell would stick out of the pad towards its neighbours)
-            src = [c for c in tree if srch.track_state(*c) is OK] or sorted(tree)
-            for grow in (prm.window_mm, prm.window_mm * 4):
-                m = int(grow / g.res)
-                win = (max(min(txs) - m, 0), max(min(tys) - m, 0), min(max(txs) + m, g.W - 1), min(max(tys) + m, g.H - 1))
-                path = srch.run(sorted(src), set(targets), tcent, win)
+        # small window first with every width (a narrow track through a pin field beats a wide one that
+        # floods the board looking for room; narrowed stretches are widened again afterwards), then large
+        tset = set(targets)
+        srcs = {}
+        for grow in (prm.window_mm, prm.window_mm * 4):
+            m = int(grow / g.res)
+            win = (max(min(txs) - m, 0), max(min(tys) - m, 0), min(max(txs) + m, g.W - 1), min(max(tys) + m, g.H - 1))
+            for srch, w in zip(searches, widths):
+                if w not in srcs:
+                    # start only where this track width keeps its clearance (a wide track starting at a
+                    # pad's edge cell would stick out of the pad towards its neighbours)
+                    srcs[w] = sorted([c for c in tree if srch.track_state(*c) is OK] or tree)
+                path = srch.run(srcs[w], tset, tcent, win)
                 if path:
+                    used_w = w
                     break
             if path:
-                used_w = w
                 break
         if not path:
             return None
