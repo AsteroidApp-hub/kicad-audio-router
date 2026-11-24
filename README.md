@@ -17,9 +17,9 @@ and measures (and, in later versions, improves) the routing with audio in mind.
 |---|---|
 | net classification (analog / digital / power / gnd, differential pairs) | ✅ v0.1 |
 | routing quality report (Markdown + JSON, 0–100 score) | ✅ v0.1 |
-| audio pre-router (analog nets, pairs side by side, away from digital) | planned |
+| audio-aware router for every net (pairs side by side, analog away from digital, push-and-reroute) | ✅ v0.1 |
 | ground handling (pours, fan-out vias, island repair) | ✅ v0.1 |
-| hand-off of the remaining nets to Freerouting (DSN/SES) | planned |
+| optional hand-off of leftovers to Freerouting (DSN/SES), not needed so far | ✅ v0.1 |
 
 ## Usage
 
@@ -33,7 +33,8 @@ KPY=/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/
 $KPY -m kar classify board.kicad_pcb                 # how each net was classified, and why
 $KPY -m kar report   board.kicad_pcb --out out/      # writes board_quality.md / .json
 $KPY -m kar report   board.kicad_pcb --json          # score only, for scripts
-$KPY -m kar ground   board.kicad_pcb --net GND,/CHASSIS -o out.kicad_pcb
+$KPY -m kar route    board.kicad_pcb --classes analog,power,digital,other -o routed.kicad_pcb
+$KPY -m kar ground   routed.kicad_pcb --net GND,/CHASSIS -o out.kicad_pcb
                                                      # vias for ground pads far from one, island repair
 $KPY -m kar ground   board.kicad_pcb --pour F.Cu,B.Cu   # also pour GND on the outer layers first
 ```
