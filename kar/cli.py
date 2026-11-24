@@ -139,7 +139,7 @@ def cmd_ground(args) -> int:
         bad |= bool(failed or res["islands_failed"])
         results.append(res)
     out = args.output or args.board
-    kicad_io.save(kb, out)
+    kicad_io.save(kb, out, args.board)
     print(json.dumps({"saved": out, "nets": results}, ensure_ascii=False, indent=1))
     return 2 if bad else 0
 
@@ -188,10 +188,10 @@ def cmd_route(args) -> int:
         if not args.json:
             print(f"  {'ok  ' if ok else 'FAIL'} {net}  ({time.time() - t0:.0f}s)", file=sys.stderr)
     res = route(board, cls, prm, rules["activity_weight"], nets, prog)
-    nt, nv = kicad_io.apply_routes(kb, res.routed, prm.via_d, prm.via_drill, lock=not args.no_lock)
+    nt, nv = kicad_io.apply_routes(kb, res.routed, prm.via_d, prm.via_drill, lock=not args.no_lock, via_of=prm.via_of)
     kicad_io.refill(kb)
     out = args.output or args.board
-    kicad_io.save(kb, out)
+    kicad_io.save(kb, out, args.board)
     summary = {"saved": out, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
                "tracks": nt, "vias": nv,
                "layers": prm.layers or [l for l in board.copper_layers if l not in board.plane_layers],
@@ -227,7 +227,7 @@ def cmd_finish(args) -> int:
     locked_after = sum(1 for t in kb.GetTracks() if t.IsLocked())
     removed = FR.cleanup_dangling(kb)
     kicad_io.refill(kb)
-    kicad_io.save(kb, out)
+    kicad_io.save(kb, out, args.board)
     after = kicad_io.from_pcbnew(kb, out)
     print(json.dumps({"saved": out, "excluded_nets": dropped, "locked_tracks": [locked_before, locked_after],
                       "dangling_removed": removed, "unrouted": after.unrouted, "log": log,
@@ -296,6 +296,9 @@ def cmd_auto(args) -> int:
     else:
         import shutil
         shutil.copy(routed, out)
+        rp, op = os.path.splitext(routed)[0] + ".kicad_pro", os.path.splitext(out)[0] + ".kicad_pro"
+        if os.path.exists(rp):
+            shutil.copyfile(rp, op)
     drc = run_drc(out, os.path.join(outdir, stem + "_drc.json"))
     # ground nets that the pours/vias did not join (no plane layer): route them as tracks, then redo ground
     if drc and drc["unconnected"] and gnd:
@@ -384,7 +387,7 @@ def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
     n = kicad_io.strip(kb, keep_locked=args.keep_locked)
-    kicad_io.save(kb, args.output)
+    kicad_io.save(kb, args.output, args.board)
     print(json.dumps({"removed": n, "saved": args.output}))
     return 0
 

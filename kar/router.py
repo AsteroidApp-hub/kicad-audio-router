@@ -55,6 +55,19 @@ class RouteParams:
     fine_fallback: bool = True        # nets that still fail are tried again on a grid twice as fine
     phase: tuple[float, float] | None = None   # grid offset; default: aligned to most fine-pitch pads
     window: tuple[float, float, float, float] | None = None   # route only inside this box (mm)
+    net_width: dict = field(default_factory=dict)   # net -> track width from its net class (project file)
+    net_via: dict = field(default_factory=dict)     # net -> (via diameter, drill) from its net class
+
+    def full_width(self, net: str, kind: str) -> float:
+        return self.net_width.get(net) or self.width.get(kind, 0.25)
+
+    def widths_for(self, net: str, kind: str) -> list[float]:
+        full = self.full_width(net, kind)
+        nw = self.narrow_width.get(kind)
+        return [full] + ([nw] if nw and nw < full - 1e-9 else [])
+
+    def via_of(self, net: str) -> tuple[float, float]:
+        return self.net_via.get(net, (self.via_d, self.via_drill))
     max_expand: int = 400_000         # node budget per search (fail fast instead of flooding the board)
     near_targets: int = 6             # heuristic looks at this many nearest remaining pads
     rip_radius: float = 2.0           # routed nets passing this close to a failed net's pads are ripped up
@@ -168,7 +181,8 @@ class Grid:
         self.clr: dict[int, float] = {}                                  # net id -> class clearance
         self.margin = self.res * 0.8
         cmax = max([prm.clearance] + list(board.net_clearance.values()))
-        hwmax = max(list(prm.width.values()) + [prm.via_d]) / 2
+        hwmax = max(list(prm.width.values()) + list(prm.net_width.values()) + [prm.via_d]
+                    + [v[0] for v in prm.net_via.values()]) / 2
         self.reach = math.sqrt((cmax + hwmax) ** 2 + 0.5 * self.res ** 2) + 0.05
         self.cu = Copper(self.reach)
 
@@ -458,7 +472,7 @@ class _Search:
         self.half = width / 2
         self.val = g.nid(net)
         self.own_cl = max(prm.clearance, getattr(g, "ncl", {}).get(net, 0.0))
-        self.via_r = prm.via_d / 2
+        self.via_r = prm.via_of(net)[0] / 2
         self.via_cost = prm.analog_via_cost if kind == "analog" else prm.via_cost
         self.pair_field = pair_field
         if kind == "analog":
@@ -828,7 +842,7 @@ def _commit(g: Grid, net: str, kind: str, segs: list[Seg], vias, prm: RouteParam
     for x, y in vias:
         if win and not _touches((x, y, x, y), win):
             continue
-        _add_via(g, x, y, prm.via_d, net, fixed)
+        _add_via(g, x, y, prm.via_of(net)[0], net, fixed)
     nid = g.nid(net)
     if nid not in g.clr:
         g.clr[nid] = max(prm.clearance, getattr(g, "ncl", {}).get(net, 0.0))
@@ -839,12 +853,12 @@ def _uncommit(g: Grid, net: str, rn: RoutedNet, prm: RouteParams):
     recompute owner / band for the cells they could have touched."""
     nid = g.nid(net)
     gone_s = {(s.x1, s.y1, s.x2, s.y2, s.width / 2) for s in rn.segs}
-    gone_v = {(x, y, prm.via_d / 2) for x, y in rn.vias}
+    gone_v = {(x, y, prm.via_of(net)[0] / 2) for x, y in rn.vias}
     regions = []   # (layer, bbox)
     for s in rn.segs:
         regions.append((g.lidx[s.layer], s.bbox(s.width / 2)))
     for x, y in rn.vias:
-        r = prm.via_d / 2
+        r = prm.via_of(net)[0] / 2
         for li in range(g.L):
             regions.append((li, (x - r, y - r, x + r, y + r)))
 
@@ -976,12 +990,12 @@ def _crossed(new: RoutedNet, done: dict[str, RoutedNet], prm: RouteParams) -> li
     from .geometry import SegIndex, edge_gap
     out = set()
     vr = prm.via_d / 2
-    new_vias = [Seg(x, y, x, y, prm.via_d, "*", new.net) for x, y in new.vias]
+    new_vias = [Seg(x, y, x, y, prm.via_of(new.net)[0], "*", new.net) for x, y in new.vias]
     for n, rn in done.items():
         if n == new.net:
             continue
         idx = SegIndex(rn.segs, cell=2.0)
-        other_vias = [Seg(x, y, x, y, prm.via_d, "*", n) for x, y in rn.vias]
+        other_vias = [Seg(x, y, x, y, prm.via_of(n)[0], "*", n) for x, y in rn.vias]
         hit = False
         for s in new.segs:
             for t in idx.near(s.layer, s.bbox(s.width / 2 + prm.clearance + 1.0)):
@@ -1009,6 +1023,13 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     (pushable) tracks; with it, the result lists every route, rerouted ones included."""
     import time as _time
     t_start = _time.time()
+    for n_ in board.nets:                       # net classes from the project file
+        c_ = board.class_of(n_)
+        if c_:
+            if c_.get("track_width"):
+                prm.net_width.setdefault(n_, float(c_["track_width"]))
+            if c_.get("via_diameter") and c_.get("via_drill"):
+                prm.net_via.setdefault(n_, (float(c_["via_diameter"]), float(c_["via_drill"])))
     base = build_grid(board, cls, prm, weights)     # pads, existing copper, edges, fields (built once)
     g = base.clone()
     pads_by_net = board.pads_by_net()
@@ -1046,9 +1067,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     def attempt(g, net, partner, first_of_pair=False):
         kind = cls.kind.get(net, "other")
         pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
-        widths = [prm.width.get(kind, 0.25)]
-        if kind in prm.narrow_width:
-            widths.append(prm.narrow_width[kind])
+        widths = prm.widths_for(net, kind)
         pf = _pair_band(g, done[partner].segs, done[partner].width, prm) if partner in done else None
         why: list = []
         res = route_net(g, pads, net, kind, widths, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0),
@@ -1105,7 +1124,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     if prm.fine_fallback and prm.res > 0.15 and prerouted is None:
         def pin_bound_net(n):
             kind = cls.kind.get(n, "other")
-            w = min(prm.width.get(kind, 0.25), prm.narrow_width.get(kind, 9.0))   # narrowest it may use
+            w = min(prm.widths_for(n, kind))   # narrowest it may use
             srch = _Search(g, n, kind, w, prm, None, 1.0)
             for p in pads_by_net.get(n, []):
                 if any(l in g.lidx for l in p.layers) and \
@@ -1234,7 +1253,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
         pf = _pair_band(g, done[partner_of[net]].segs, done[partner_of[net]].width, prm) \
             if partner_of.get(net) in done else None
-        res = route_net(g, pads, net, kind, prm.narrow_width.get(kind, prm.width.get(kind, 0.25)), prm, pf,
+        res = route_net(g, pads, net, kind, prm.widths_for(net, kind)[-1], prm, pf,
                         weights.get(cls.activity.get(net, "data"), 1.0), id_cost)
         if not res:
             failed.append(net)
@@ -1312,7 +1331,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
 
         def narrow_len(n, rn):
             kind = cls.kind.get(n, "other")
-            full = full_of.get(kind, 0.25)
+            full = prm.full_width(n, kind)
             small = [p for p in pads_by_net.get(n, []) if min(p.box()[2] - p.box()[0], p.box()[3] - p.box()[1]) < full]
             return sum(sg.length for sg in rn.segs if sg.width < full - 1e-9 and not any(
                 min(p.dist(sg.x1, sg.y1), p.dist(sg.x2, sg.y2)) < 1.5 for p in small))
@@ -1329,7 +1348,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             id_cost = {g.nid(m): (prm.push_cost_analog if cls.kind.get(m) == "analog" else prm.push_cost)
                        * max(1.0, len(pads_by_net.get(m, [])) / 4.0) for m in done}
             pads = [p for p in pads_by_net.get(n, []) if any(l in g.lidx for l in p.layers)]
-            res = route_net(g, pads, n, kind, [prm.width.get(kind, 0.25), prm.narrow_width.get(kind, 0.25)], prm,
+            res = route_net(g, pads, n, kind, prm.widths_for(n, kind), prm,
                             None, weights.get(cls.activity.get(n, "data"), 1.0), id_cost)
             why = "no route" if res is None else ""
             ok = not why
@@ -1444,7 +1463,7 @@ def widen(board: Board, routes: list[RoutedNet], cls: Classification, prm: Route
     all_segs = list(board.segs) + [s for r in routes for s in r.segs]
     idx = SegIndex(all_segs, cell=2.0)
     vias = [(v.x, v.y, v.diameter / 2, v.net) for v in board.vias] + \
-           [(x, y, prm.via_d / 2, r.net) for r in routes for x, y in r.vias]
+           [(x, y, prm.via_of(r.net)[0] / 2, r.net) for r in routes for x, y in r.vias]
     pads = [p for fp in board.footprints for p in fp.pads]
     count = 0
 
@@ -1491,7 +1510,7 @@ def widen(board: Board, routes: list[RoutedNet], cls: Classification, prm: Route
         kind = cls.kind.get(r.net, "other")
         if kind not in kinds or (only is not None and r.net not in only):
             continue
-        full = prm.width.get(kind, 0.25)
+        full = prm.full_width(r.net, kind)
         targets = [full] + [w for w in (0.4,) if w < full]
         new = []
         for s in r.segs:

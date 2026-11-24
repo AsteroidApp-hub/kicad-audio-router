@@ -39,7 +39,7 @@ class Report:
         p = d["pairs"]
         L += [f"| differential pairs | {len(p['items'])} (mismatch max {p['max_mismatch_mm']:.1f} mm, side-by-side {p['avg_parallel_pct']:.0f} %, away from pins {p['avg_parallel_away_pct']:.0f} %) |",
               f"| GND pads farther than {d['gnd']['limit_mm']} mm from a GND via | {len(d['gnd']['far'])} / {d['gnd']['pads']} |",
-              f"| power nets narrower than {d['power']['min_width_mm']} mm | {len(d['power']['narrow'])} "
+              f"| power nets narrower than their width (net class, else {d['power']['min_width_mm']} mm) | {len(d['power']['narrow'])} "
               f"(neck-downs into fine-pitch pins not counted: {d['power'].get('neck_downs', 0)}) |", ""]
         worst = d["coupling"]["worst"][:15]
         if worst:
@@ -169,11 +169,15 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
     lim = m["power_min_width_mm"]
     pads_of = board.pads_by_net()
     for n in cls.nets_of("power"):
-        full = m.get("power_full_width_mm", 0.5)
+        # a net class with its own track width sets the expectation for that net (the designer's choice)
+        nc = board.class_of(n) if hasattr(board, "class_of") else None
+        own = float(nc["track_width"]) if nc and nc.get("track_width") else None
+        full = own or m.get("power_full_width_mm", 0.5)
+        want = own or lim
         small = [p for p in pads_of.get(n, []) if min(p.box()[2] - p.box()[0], p.box()[3] - p.box()[1]) < full]
         bad_w, bad_len = None, 0.0
         for sg in board.segs:
-            if sg.net != n or sg.width >= lim - 1e-6:
+            if sg.net != n or sg.width >= want - 1e-6:
                 continue
             if any(min(p.dist(sg.x1, sg.y1), p.dist(sg.x2, sg.y2)) < 1.5 for p in small):
                 neck += 1

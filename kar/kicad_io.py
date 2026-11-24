@@ -28,7 +28,41 @@ def _via_width(v) -> float:
 
 def load(path: str) -> tuple[Board, "pcbnew.BOARD"]:
     kb = pcbnew.LoadBoard(path)
-    return from_pcbnew(kb, path), kb
+    b = from_pcbnew(kb, path)
+    read_netclasses(b, path)
+    return b, kb
+
+
+def read_netclasses(board: Board, pcb_path: str) -> None:
+    """Net classes from the project file next to the board (<name>.kicad_pro): widths and via sizes,
+    explicit assignments and wildcard patterns."""
+    import fnmatch
+    import json
+    import os
+    pro = os.path.splitext(pcb_path)[0] + ".kicad_pro"
+    if not os.path.exists(pro):
+        return
+    try:
+        with open(pro, encoding="utf-8") as f:
+            ns = json.load(f).get("net_settings", {})
+    except Exception:   # noqa: BLE001
+        return
+    for c in ns.get("classes", []):
+        board.netclasses[c.get("name", "")] = {k: c.get(k) for k in ("track_width", "clearance", "via_diameter",
+                                                                     "via_drill", "diff_pair_width", "diff_pair_gap")}
+    assign = ns.get("netclass_assignments") or {}
+    pats = ns.get("netclass_patterns") or []
+    for n in board.nets:
+        a = assign.get(n) if isinstance(assign, dict) else None
+        if isinstance(a, list):
+            a = a[0] if a else None
+        if not a:
+            for pt in pats:
+                if fnmatch.fnmatchcase(n, pt.get("pattern", "")):
+                    a = pt.get("netclass")
+                    break
+        if a:
+            board.net_class[n] = a
 
 
 def from_pcbnew(kb, source: str = "") -> Board:
@@ -242,11 +276,20 @@ def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float) 
     return len(plans)
 
 
-def save(kb, path: str) -> None:
+def save(kb, path: str, src: str | None = None) -> None:
+    """Save the board. The project file (design rules, net classes) of `src` is copied next to it, so
+    the saved board is checked against the same rules (SaveBoard alone may write default settings)."""
+    import os
+    import shutil
     pcbnew.SaveBoard(path, kb)
+    if src:
+        sp = os.path.splitext(src)[0] + ".kicad_pro"
+        dp = os.path.splitext(path)[0] + ".kicad_pro"
+        if os.path.exists(sp) and os.path.abspath(sp) != os.path.abspath(dp):
+            shutil.copyfile(sp, dp)
 
 
-def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True) -> tuple[int, int]:
+def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True, via_of=None) -> tuple[int, int]:
     """Write RoutedNet results (kar.router) to the board. Locked tracks are kept by Freerouting
     (KiCad exports them as protected wiring)."""
     nt = nv = 0
@@ -262,14 +305,15 @@ def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True) -> t
             t.SetLocked(lock)
             kb.Add(t)
             nt += 1
+        vd, vdr = via_of(r.net) if via_of else (via_d, drill)
         for x, y in r.vias:
             v = pcbnew.PCB_VIA(kb)
             v.SetPosition(pcbnew.VECTOR2I(_from_mm(x), _from_mm(y)))
-            v.SetDrill(_from_mm(drill))
+            v.SetDrill(_from_mm(vdr))
             try:
-                v.SetWidth(pcbnew.F_Cu, _from_mm(via_d))
+                v.SetWidth(pcbnew.F_Cu, _from_mm(vd))
             except TypeError:
-                v.SetWidth(_from_mm(via_d))
+                v.SetWidth(_from_mm(vd))
             v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
             v.SetNet(n)
             v.SetLocked(lock)

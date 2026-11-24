@@ -85,6 +85,15 @@ class Board:
     net_clearance: dict[str, float] = field(default_factory=dict)   # net -> clearance from its net class
     keepouts: list[dict] = field(default_factory=list)   # rule areas: {"poly", "layers", "no_tracks", "no_vias"}
     hole_clearance: float = 0.0      # board rule: copper to holes (used for pads without a net, e.g. NPTH)
+    net_class: dict[str, str] = field(default_factory=dict)        # net -> net class name (project file)
+    netclasses: dict[str, dict] = field(default_factory=dict)      # class -> {"track_width", "via_diameter", ...}
+
+    def class_of(self, net: str) -> dict | None:
+        """The net's own net class settings, None for nets in the Default class (no explicit intent)."""
+        c = self.net_class.get(net)
+        if not c or c == "Default":
+            return None
+        return self.netclasses.get(c)
 
     def clearance(self, *nets: str, default: float = 0.2) -> float:
         """Clearance needed between copper of these nets (the larger rule wins). A pad without a net
