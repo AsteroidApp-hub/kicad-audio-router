@@ -23,17 +23,23 @@ def kicad_python():
         return None
 
 
+def _demo(py, d):
+    """Build the demo board in a temporary folder (the copy in examples/ stays untouched)."""
+    path = os.path.join(d, "demo_receiver.kicad_pcb")
+    subprocess.run([py, "-c", f"from kar.demo import build; build({path!r})"], cwd=ROOT, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return path
+
+
 def test_demo_auto():
     py = kicad_python()
     if not py:
         print("skip: KiCad Python not found")
         return
-    subprocess.run([py, os.path.join(ROOT, "examples", "make_demo.py")], cwd=ROOT, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, "demo.kicad_pcb")
-        r = subprocess.run([py, "-m", "kar", "auto", os.path.join(ROOT, "examples", "demo_receiver.kicad_pcb"),
-                            "-o", out], cwd=ROOT, capture_output=True, text=True)
+        demo = _demo(py, d)
+        out = os.path.join(d, "routed", "demo.kicad_pcb")
+        r = subprocess.run([py, "-m", "kar", "auto", demo, "-o", out], cwd=ROOT, capture_output=True, text=True)
         t = r.stdout
         s = json.loads(t[t.rfind('{\n "saved"'):])
         assert s["unrouted"] == 0, s
@@ -73,12 +79,10 @@ def test_reroute_keeps_hand_copper():
     if not py:
         print("skip: KiCad Python not found")
         return
-    subprocess.run([py, os.path.join(ROOT, "examples", "make_demo.py")], cwd=ROOT, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with tempfile.TemporaryDirectory() as d:
+        demo = _demo(py, d)
         r1, ed, r2 = (os.path.join(d, n + ".kicad_pcb") for n in ("r1", "edited", "r2"))
-        subprocess.run([py, "-m", "kar", "auto", os.path.join(ROOT, "examples", "demo_receiver.kicad_pcb"), "-o", r1],
-                       cwd=ROOT, check=True, capture_output=True)
+        subprocess.run([py, "-m", "kar", "auto", demo, "-o", r1], cwd=ROOT, check=True, capture_output=True)
         subprocess.run([py, "-c", EDIT, r1, ed], check=True, capture_output=True)
         out = subprocess.run([py, "-m", "kar", "auto", ed, "-o", r2, "--rip-kar"], cwd=ROOT, capture_output=True,
                              text=True).stdout
