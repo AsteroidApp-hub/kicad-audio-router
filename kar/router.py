@@ -49,6 +49,7 @@ class RouteParams:
     pair_gap: float = 0.25            # target edge gap between the two sides of a pair
     pair_cost: float = 1.5            # extra cost per step for the second side away from the first
     pair_retry_below: float = 0.5     # if the sides run together less than this, try other orders/costs
+    pair_room_cost: float = 0.0       # first side of a pair pays for crowded corridors (off: no gain on test boards)
     window_mm: float = 12.0           # search window around the net, widened once on failure
     rip_rounds: int = 3               # rip-up and reroute rounds for nets that failed
     fine_fallback: bool = True        # nets that still fail are tried again on a grid twice as fine
@@ -444,6 +445,8 @@ class _Search:
             self.field, self.fw = g.near_ana, prm.near_cost * act_w
         else:
             self.field, self.fw = None, 0.0
+        self.room = None                     # set for the first side of a pair: cost of crowded cells
+        self._room: dict[int, float] = {}
         self._t: dict[int, object] = {}      # track check cache: OK, FIXED or frozenset of routed net ids
         self._v: dict[int, object] = {}      # via check cache
         self._need: dict[tuple[int, float], float] = {}
@@ -491,6 +494,31 @@ class _Search:
                     viol = set()
                 viol.add(nid)
         return frozenset(viol) if viol else OK
+
+    def crowd(self, li: int, cx: int, cy: int) -> float:
+        """Share of cells around (within one pair pitch) that hold other copper: 0 open .. 1 walled in."""
+        key = (li * self.g.H + cy) * self.g.W + cx
+        r = self._room.get(key)
+        if r is None:
+            g = self.g
+            o, W, H, v = g.occ[li], g.W, g.H, self.val
+            k = self._room_k
+            n = bad = 0
+            for dx in range(-k, k + 1):
+                for dy in range(-k, k + 1):
+                    if dx * dx + dy * dy > k * k:
+                        continue
+                    x, y = cx + dx, cy + dy
+                    n += 1
+                    if not (0 <= x < W and 0 <= y < H):
+                        bad += 1
+                        continue
+                    c = o[y * W + x]
+                    if c != 0 and c != v:
+                        bad += 1
+            r = bad / n
+            self._room[key] = r
+        return r
 
     def track_state(self, li: int, cx: int, cy: int):
         key = (li * self.g.H + cy) * self.g.W + cx
@@ -562,6 +590,7 @@ class _Search:
         fw = self.fw
         pfs = self.pair_field
         pair_cost = prm.pair_cost
+        room = self.room
         bend = prm.bend_cost
         via_cost = self.via_cost
         tgt = {(li * H + y) * W + x for li, x, y in targets}
@@ -637,6 +666,8 @@ class _Search:
                     c += step * fw * fld[i]
                 if pf is not None:
                     c += step * pair_cost * (1.0 - pf[i])
+                if room:
+                    c += step * room * self.crowd(li, nx, ny)
                 if pdir >= 0 and pdir != d:
                     c += bend
                 ng = gc + c
@@ -801,7 +832,8 @@ def _pair_band(g: Grid, segs: list[Seg], width: float, prm: RouteParams) -> list
 
 
 def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: RouteParams,
-              pair_field=None, act_w: float = 1.0, push: dict[int, float] | None = None) -> RoutedNet | None:
+              pair_field=None, act_w: float = 1.0, push: dict[int, float] | None = None,
+              first_of_pair: bool = False) -> RoutedNet | None:
     """Grow a tree over the net's pads. `width` may be a list: each connection tries the widths in
     order (e.g. a power net goes narrow only where the wide track does not fit)."""
     widths = list(width) if isinstance(width, (list, tuple)) else [width]
@@ -809,6 +841,10 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
     if len(pads) < 2:
         return None
     searches = [_Search(g, net, kind, w, prm, pair_field, act_w, push) for w in widths]
+    if first_of_pair and prm.pair_room_cost:
+        for sr, w in zip(searches, widths):
+            sr.room = prm.pair_room_cost
+            sr._room_k = max(1, int(round((w + prm.clearance + g.margin + w / 2) / g.res)))
     tree: set[tuple[int, int, int]] = set(_pad_cells(g, pads[0]))
     remaining = list(pads[1:])
     all_segs, all_vias = [], []
@@ -922,14 +958,15 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False)
         done[n] = rn
 
-    def attempt(g, net, partner):
+    def attempt(g, net, partner, first_of_pair=False):
         kind = cls.kind.get(net, "other")
         pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
         widths = [prm.width.get(kind, 0.25)]
         if kind in prm.narrow_width:
             widths.append(prm.narrow_width[kind])
         pf = _pair_band(g, done[partner].segs, done[partner].width, prm) if partner in done else None
-        res = route_net(g, pads, net, kind, widths, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0))
+        res = route_net(g, pads, net, kind, widths, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0),
+                        first_of_pair=first_of_pair)
         if res:
             _commit(g, net, kind, res.segs, res.vias, prm)
             done[net] = res
@@ -959,7 +996,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             g1 = g0.clone()
             saved = prm.pair_cost
             prm.pair_cost = pc
-            ok1 = attempt(g1, first, None)
+            ok1 = attempt(g1, first, None, first_of_pair=True)
             ok2 = attempt(g1, second, first) if ok1 else False
             prm.pair_cost = saved
             r1, r2 = done.pop(first, None), done.pop(second, None)
