@@ -1157,7 +1157,9 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
                 _commit(g, rn.net, cls.kind.get(rn.net, "other"), rn.segs, rn.vias, prm)
                 done[rn.net] = rn
             todo = [(n, pt) for n, pt in todo if n not in done]
-            early_stats = {"early_nets": len(early), "t_early": round(_time.time() - t_e, 1), "early_failed": efail}
+            early_stats = {"early_nets": len(early), "t_early": round(_time.time() - t_e, 1), "early_failed": efail,
+                           "events": [{"type": "fine_first", "nets": early, "failed": efail,
+                                       "why": "a pin no coarse grid cell can reach (fine pitch)"}]}
 
     todo_all = list(order)
     handled = set()
@@ -1183,7 +1185,9 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     import time
     t_end = time.time() + prm.rip_time_s
     stats = {"t_main": round(time.time() - t_start, 1), "failed_main": len(failed), "pushes": 0,
-             "rerouted": 0, **early_stats}
+             "rerouted": 0, "events": [], **early_stats}
+    if failed:
+        stats["events"].append({"type": "failed_first_pass", "nets": list(failed)})
 
     def rebuild(keep: dict[str, RoutedNet]):
         # occupancy from scratch; the proximity fields keep ripped analog tracks (harmless, slightly cautious)
@@ -1267,6 +1271,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
                 _uncommit(g, v, rv, prm)
         done[net] = res
         _commit(g, net, kind, res.segs, res.vias, prm)
+        stats["events"].append({"type": "push", "net": net, "moved": victims})
         if progress:
             progress(f"{net} (pushed {len(victims)}: {', '.join(victims[:4])})", True)
         stats["rerouted"] += len(victims)
@@ -1305,6 +1310,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
                 return new_done, new_failed
             return done_, failed_
 
+        before_fine = list(failed)
         # all failed nets together first (one fine grid, aligned to their pads) ...
         done, failed = attempt_fine(failed, failed, done, failed)
         # ... then one at a time, each with the grid on its own pads
@@ -1313,6 +1319,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         # ... and, for what is still left, on the whole board (long routes outside the window can move)
         for net in list(failed):
             done, failed = attempt_fine([net], [net], done, failed, windowed=False)
+        stats["events"].append({"type": "fine_fallback", "nets": before_fine, "still_failed": list(failed)})
     stats["t_fine"] = round(time.time() - t_fine, 1)
 
     # 4) widen what fits; power nets still narrow away from fine-pitch pins are then re-routed wide,
@@ -1375,6 +1382,8 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
                 ok = after < 0.5 * before
                 why = "" if ok else f"narrow {before:.1f} -> {after:.1f} mm"
             stats.setdefault("widen_push_log", []).append(f"{n}: {'ok' if ok else why}")
+            stats["events"].append({"type": "rewiden", "net": n, "ok": ok, "moved": victims if ok else [],
+                                    "why": why, "narrow_before_mm": round(before, 1)})
             if ok:
                 widened += 1
                 if progress:

@@ -44,10 +44,12 @@ class Report:
         worst = d["coupling"]["worst"][:15]
         if worst:
             L += ["## Analog nets closest to digital", "",
-                  f"| analog net | within {d['coupling']['gaps'][0]} mm (weighted) | within {d['coupling']['gaps'][-1]} mm (weighted) | digital nets |",
-                  "|---|---:|---:|---|"]
+                  f"| analog net | within {d['coupling']['gaps'][0]} mm (weighted) | within {d['coupling']['gaps'][-1]} mm (weighted) | digital nets | closest at (x, y, layer: gap) |",
+                  "|---|---:|---:|---|---|"]
             for w in worst:
-                L.append(f"| {w['net']} | {w['near'][0]:.1f} ({w['weighted'][0]:.1f}) | {w['near'][-1]:.1f} ({w['weighted'][-1]:.1f}) | {', '.join(w['aggressors'][:5])} |")
+                c_ = w.get("closest")
+                at = f"{c_['x']}, {c_['y']}, {c_['layer']}: {c_['gap_mm']} mm to {c_['digital']}" if c_ else ""
+                L.append(f"| {w['net']} | {w['near'][0]:.1f} ({w['weighted'][0]:.1f}) | {w['near'][-1]:.1f} ({w['weighted'][-1]:.1f}) | {', '.join(w['aggressors'][:5])} | {at} |")
             L.append("")
         if p["items"]:
             L += ["## Differential pairs", "", "| pair | length | mismatch | side-by-side | away from pins |",
@@ -63,9 +65,11 @@ class Report:
                 L.append(f"| {f['pad']} | {f['dist_mm']:.1f} |")
             L.append("")
         if d["power"]["narrow"]:
-            L += ["## Narrow power tracks", "", "| net | narrowest | narrow length |", "|---|---:|---:|"]
+            L += ["## Narrow power tracks", "", "| net | narrowest | narrow length | longest stretches at (x, y, layer) |",
+                  "|---|---:|---:|---|"]
             for f in d["power"]["narrow"]:
-                L.append(f"| {f['net']} | {f['min_width_mm']:.2f} | {f.get('length_mm', 0):.1f} mm |")
+                at = "; ".join(f"{a['x']}, {a['y']}, {a['layer']}" for a in f.get("at", []))
+                L.append(f"| {f['net']} | {f['min_width_mm']:.2f} | {f.get('length_mm', 0):.1f} mm | {at} |")
             L.append("")
         return "\n".join(L) + "\n"
 
@@ -98,6 +102,24 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
     worst = sorted(({"net": n, "near": e["near"], "weighted": e["weighted"], "aggressors": sorted(e["aggr"])}
                     for n, e in per_net.items() if e["near"][-1] > 0),
                    key=lambda x: (-x["weighted"][0], -x["weighted"][-1]))
+    # where to look: closest approach of each of the worst analog nets to digital copper
+    all_dig = SegIndex(digital_segs, cell=2.0)
+    from .geometry import edge_gap
+    for w in worst[:15]:
+        best = None
+        for sg in analog_segs:
+            if sg.net != w["net"]:
+                continue
+            for o in all_dig.near(sg.layer, sg.bbox(gaps[-1] + 1.0)):
+                gp = edge_gap(sg, o)
+                if best is None or gp < best[0]:
+                    # a point on the analog segment closest to the digital one
+                    best = (gp, sg, o)
+        if best:
+            gp, sg, o = best
+            px, py = _closest_point(sg, o)
+            w["closest"] = {"gap_mm": round(gp, 2), "x": round(px, 2), "y": round(py, 2), "layer": sg.layer,
+                            "digital": o.net}
     coupling = {"gaps": gaps,
                 "total_mm": {str(g): sum(e["near"][i] for e in per_net.values()) for i, g in enumerate(gaps)},
                 "weighted_mm": {str(g): sum(e["weighted"][i] for e in per_net.values()) for i, g in enumerate(gaps)},
@@ -175,7 +197,7 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
         full = own or m.get("power_full_width_mm", 0.5)
         want = own or lim
         small = [p for p in pads_of.get(n, []) if min(p.box()[2] - p.box()[0], p.box()[3] - p.box()[1]) < full]
-        bad_w, bad_len = None, 0.0
+        bad_w, bad_len, where = None, 0.0, []
         for sg in board.segs:
             if sg.net != n or sg.width >= want - 1e-6:
                 continue
@@ -184,8 +206,11 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
                 continue
             bad_w = sg.width if bad_w is None else min(bad_w, sg.width)
             bad_len += sg.length
+            where.append((sg.length, round((sg.x1 + sg.x2) / 2, 2), round((sg.y1 + sg.y2) / 2, 2), sg.layer))
         if bad_w is not None:
-            narrow.append({"net": n, "min_width_mm": bad_w, "length_mm": round(bad_len, 1)})
+            where.sort(reverse=True)
+            narrow.append({"net": n, "min_width_mm": bad_w, "length_mm": round(bad_len, 1),
+                           "at": [{"x": x, "y": y, "layer": l, "length_mm": round(ln, 1)} for ln, x, y, l in where[:3]]})
     power = {"min_width_mm": lim, "narrow": narrow, "neck_downs": neck}
 
     summary = {k: len(cls.nets_of(k)) for k in ("analog", "digital", "power", "gnd", "other")}
@@ -201,6 +226,20 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
                         for n in sorted(cls.kind)},
             "pairs_found": cls.pairs, "score": score, "score_parts": parts}
     return Report(data)
+
+
+def _closest_point(a: Seg, b: Seg) -> tuple[float, float]:
+    """Point on segment a closest to segment b (sampled)."""
+    from .geometry import point_seg_dist
+    n = max(2, int(a.length / 0.1))
+    best = None
+    for k in range(n + 1):
+        t = k / n
+        x, y = a.x1 + t * (a.x2 - a.x1), a.y1 + t * (a.y2 - a.y1)
+        d = point_seg_dist(x, y, b.x1, b.y1, b.x2, b.y2)
+        if best is None or d < best[0]:
+            best = (d, x, y)
+    return best[1], best[2]
 
 
 def _score(board, summary, coupling, pairs, gnd, power) -> tuple[float, dict]:

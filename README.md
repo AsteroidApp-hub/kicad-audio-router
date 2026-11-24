@@ -67,6 +67,17 @@ $KPY -m kar report   board.kicad_pcb --out out/              # quality report (M
 Place the parts first (kar does not move footprints). Existing tracks are kept; `kar strip` removes them
 if you want to start over. Always review the result in KiCad and run its DRC before ordering.
 
+### Reviewing the result
+
+- Everything kar places goes into PCB groups named `kar: analog`, `kar: digital`, `kar: power`,
+  `kar: ground`, `kar: other`. Click a group in KiCad to select (and see) that kind of copper at once.
+- `kar auto` writes a route log (`<board>_routed_route.md` / `.json`): per net its length, vias, widths and
+  layers, and every step that needed more than a plain route (pins reached on a finer grid, nets that pushed
+  others aside and which ones they moved, power nets narrowed below their width).
+- The quality report (`<board>_quality.md`) gives board coordinates (x, y, layer) for the places to look at:
+  where each analog net comes closest to digital copper, and where power tracks are narrower than their
+  net class width.
+
 ### Commands
 
 | command | what it does |

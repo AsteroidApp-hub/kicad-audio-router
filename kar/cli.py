@@ -192,11 +192,17 @@ def cmd_route(args) -> int:
         if not args.json:
             print(f"  {'ok  ' if ok else 'FAIL'} {net}  ({time.time() - t0:.0f}s)", file=sys.stderr)
     res = route(board, cls, prm, rules["activity_weight"], nets, prog)
-    nt, nv = kicad_io.apply_routes(kb, res.routed, prm.via_d, prm.via_drill, lock=not args.no_lock, via_of=prm.via_of)
+    nt, nv = kicad_io.apply_routes(kb, res.routed, prm.via_d, prm.via_drill, lock=not args.no_lock, via_of=prm.via_of,
+                                   group_of=lambda n: f"kar: {cls.kind.get(n, 'other')}")
+    log_files = None
+    if getattr(args, "log", None):
+        from . import routelog
+        stem = os.path.splitext(os.path.basename(args.output or args.board))[0]
+        log_files = routelog.write(routelog.build(res.routed, cls, res.stats, prm.full_width), args.log, stem)
     kicad_io.refill(kb)
     out = args.output or args.board
     kicad_io.save(kb, out, args.board)
-    summary = {"saved": out, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
+    summary = {"saved": out, "log": log_files, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
                "tracks": nt, "vias": nv,
                "layers": prm.layers or [l for l in board.copper_layers if l not in board.plane_layers],
                "seconds": round(time.time() - t0, 1), "stats": res.stats}
@@ -288,7 +294,7 @@ def cmd_auto(args) -> int:
     routed = os.path.join(outdir, stem + "_routed.kicad_pcb")
     ns = _ap.Namespace(board=args.board, output=routed, rules=args.rules, classes=args.classes, nets=None,
                        layers=args.layers, grid=args.grid, clearance=args.clearance, no_lock=args.no_lock,
-                       no_fanout=False, fanout_dist=1.0, json=True)
+                       no_fanout=False, fanout_dist=1.0, json=True, log=outdir)
     rc_route = cmd_route(ns)
     from . import kicad_io
     from .classify import classify
@@ -427,6 +433,7 @@ def main(argv=None) -> int:
     r.add_argument("--analog-via-cost", type=float, help="via cost for analog nets in grid steps (default 30)")
     r.add_argument("--fanout-dist", type=float, default=1.0,
                    help="before routing, ground pads without a ground via this close get one (default 1 mm)")
+    r.add_argument("--log", help="write a route log (<board>_route.md / .json) to this folder")
     r.add_argument("--json", action="store_true")
     r.set_defaults(fn=cmd_route)
     fz = sub.add_parser("finish", help="route what is left with Freerouting, keeping locked tracks")

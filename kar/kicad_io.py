@@ -251,8 +251,10 @@ def islands(kb, net: str, layer: str) -> list[list[tuple[float, float]]]:
     return out
 
 
-def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float) -> int:
+def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float,
+               group_name: str | None = "kar: ground") -> int:
     n = kb.FindNet(net)
+    grp = group(kb, group_name) if group_name and plans else None
     for p in plans:
         v = pcbnew.PCB_VIA(kb)
         v.SetPosition(pcbnew.VECTOR2I(_from_mm(p.x), _from_mm(p.y)))
@@ -264,6 +266,8 @@ def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float) 
         v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
         v.SetNet(n)
         kb.Add(v)
+        if grp is not None:
+            grp.AddItem(v)
         if p.track:
             x1, y1, x2, y2, layer = p.track
             t = pcbnew.PCB_TRACK(kb)
@@ -273,6 +277,8 @@ def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float) 
             t.SetLayer(layer_id(kb, layer))
             t.SetNet(n)
             kb.Add(t)
+            if grp is not None:
+                grp.AddItem(t)
     return len(plans)
 
 
@@ -289,12 +295,26 @@ def save(kb, path: str, src: str | None = None) -> None:
             shutil.copyfile(sp, dp)
 
 
-def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True, via_of=None) -> tuple[int, int]:
+def group(kb, name: str):
+    """A PCB group by name (created if missing), so kar's copper can be selected in one click."""
+    for g in kb.Groups():
+        if g.GetName() == name:
+            return g
+    g = pcbnew.PCB_GROUP(kb)
+    g.SetName(name)
+    kb.Add(g)
+    return g
+
+
+def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True, via_of=None,
+                 group_of=None) -> tuple[int, int]:
     """Write RoutedNet results (kar.router) to the board. Locked tracks are kept by Freerouting
-    (KiCad exports them as protected wiring)."""
+    (KiCad exports them as protected wiring). `group_of(net)` names the PCB group for the net's copper
+    (e.g. "kar: analog"); None leaves it ungrouped."""
     nt = nv = 0
     for r in routed:
         n = kb.FindNet(r.net)
+        grp = group(kb, group_of(r.net)) if group_of else None
         for s in r.segs:
             t = pcbnew.PCB_TRACK(kb)
             t.SetStart(pcbnew.VECTOR2I(_from_mm(s.x1), _from_mm(s.y1)))
@@ -304,6 +324,8 @@ def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True, via_
             t.SetNet(n)
             t.SetLocked(lock)
             kb.Add(t)
+            if grp is not None:
+                grp.AddItem(t)
             nt += 1
         vd, vdr = via_of(r.net) if via_of else (via_d, drill)
         for x, y in r.vias:
@@ -318,6 +340,8 @@ def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True, via_
             v.SetNet(n)
             v.SetLocked(lock)
             kb.Add(v)
+            if grp is not None:
+                grp.AddItem(v)
             nv += 1
     return nt, nv
 
