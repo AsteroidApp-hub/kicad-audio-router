@@ -63,6 +63,8 @@ class RouteParams:
     push_cost_analog: float = 60.0    # ... through an analog track
     push_limit: int = 4               # how many times one net may push others
     push_total: int = 0               # pushes in all (0: 3 x the nets that failed, at least 20)
+    widen_push_s: float = 60.0        # time for re-routing narrowed power nets wide by pushing others
+    widen_push_victims: int = 6       # ... giving up on a net if it would move more routes than this
     local_rip: bool = False           # also try ripping up everything near a failed net's pads first
     h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 1.2, "other": 1.5,
                                                     "gnd": 1.5})
@@ -1287,6 +1289,75 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         for net in list(failed):
             done, failed = attempt_fine([net], [net], done, failed, windowed=False)
     stats["t_fine"] = round(time.time() - t_fine, 1)
+
+    # 4) widen what fits; power nets still narrow away from fine-pitch pins are then re-routed wide,
+    #    pushing other routes aside, and kept only if the narrow length halves and every pushed route
+    #    finds a new way
+    if prerouted is None:
+        stats["widened"] = widen(board, list(done.values()), cls, prm)
+        if stats["widened"]:
+            # the grid still holds the narrow copies: lay the routes down again as they are now
+            g = base.clone()
+            for n_, rn_ in done.items():
+                _commit(g, n_, cls.kind.get(n_, "other"), rn_.segs, rn_.vias, prm, fields=False)
+    if prm.widen_push_s > 0 and prerouted is None and not failed:
+        t_w = time.time()
+        full_of = prm.width
+        widened = 0
+
+        def narrow_len(n, rn):
+            kind = cls.kind.get(n, "other")
+            full = full_of.get(kind, 0.25)
+            small = [p for p in pads_by_net.get(n, []) if min(p.box()[2] - p.box()[0], p.box()[3] - p.box()[1]) < full]
+            return sum(sg.length for sg in rn.segs if sg.width < full - 1e-9 and not any(
+                min(p.dist(sg.x1, sg.y1), p.dist(sg.x2, sg.y2)) < 1.5 for p in small))
+        cands = sorted(((narrow_len(n, rn), n) for n, rn in done.items() if cls.kind.get(n) == "power"), reverse=True)
+        for before, n in cands:
+            if before < 1.0:
+                break
+            if time.time() - t_w > prm.widen_push_s:
+                break
+            kind = cls.kind.get(n, "other")
+            snap_g, snap_done = g.clone(), dict(done)
+            old = done.pop(n)
+            _uncommit(g, n, old, prm)
+            id_cost = {g.nid(m): (prm.push_cost_analog if cls.kind.get(m) == "analog" else prm.push_cost)
+                       * max(1.0, len(pads_by_net.get(m, [])) / 4.0) for m in done}
+            pads = [p for p in pads_by_net.get(n, []) if any(l in g.lidx for l in p.layers)]
+            res = route_net(g, pads, n, kind, [prm.width.get(kind, 0.25), prm.narrow_width.get(kind, 0.25)], prm,
+                            None, weights.get(cls.activity.get(n, "data"), 1.0), id_cost)
+            why = "no route" if res is None else ""
+            ok = not why
+            victims = []
+            if ok:
+                victims = [v for v in with_partners(_crossed(res, done, prm)) if v != n]
+                ok = len(victims) <= prm.widen_push_victims
+                why = "" if ok else f"would move {len(victims)} routes"
+            if ok:
+                for v in victims:
+                    _uncommit(g, v, done.pop(v), prm)
+                done[n] = res
+                _commit(g, n, kind, res.segs, res.vias, prm)
+                bad = reroute(g, victims)
+                ok = not bad
+                why = "" if ok else f"could not re-route {bad}"
+            if ok:
+                narrow_copy = RoutedNet(n, list(done[n].segs), list(done[n].vias), done[n].width)
+                if widen(board, list(done.values()), cls, prm, only={n}):
+                    _uncommit(g, n, narrow_copy, prm)
+                    _commit(g, n, kind, done[n].segs, done[n].vias, prm, fields=False)
+                after = narrow_len(n, done[n])
+                ok = after < 0.5 * before
+                why = "" if ok else f"narrow {before:.1f} -> {after:.1f} mm"
+            stats.setdefault("widen_push_log", []).append(f"{n}: {'ok' if ok else why}")
+            if ok:
+                widened += 1
+                if progress:
+                    progress(f"{n} wide (moved {len(victims)})", True)
+            else:
+                g, done = snap_g, snap_done          # roll back
+        stats["power_rewidened"] = widened
+        stats["t_widen_push"] = round(time.time() - t_w, 1)
     stats["t_total"] = round(time.time() - t_start, 1)
     if prerouted is not None:
         return RouteResult(list(done.values()) + list(frozen.values()), failed, skipped, stats)
@@ -1359,7 +1430,7 @@ def escape_to_via(board: Board, cls: Classification, prm: RouteParams, weights: 
 
 
 def widen(board: Board, routes: list[RoutedNet], cls: Classification, prm: RouteParams,
-          kinds=("power", "gnd")) -> int:
+          kinds=("power", "gnd"), only: set | None = None) -> int:
     """After routing: tracks of power/ground nets that had to go narrow are widened back where the
     copper around allows it (checked against real shapes, clearances per net class). Returns the
     number of segments widened. Routes are updated in place."""
@@ -1413,7 +1484,7 @@ def widen(board: Board, routes: list[RoutedNet], cls: Classification, prm: Route
 
     for r in routes:
         kind = cls.kind.get(r.net, "other")
-        if kind not in kinds:
+        if kind not in kinds or (only is not None and r.net not in only):
             continue
         full = prm.width.get(kind, 0.25)
         targets = [full] + [w for w in (0.4,) if w < full]
