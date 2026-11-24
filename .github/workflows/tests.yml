@@ -2,6 +2,7 @@ name: tests
 on: [push, pull_request]
 jobs:
   core:
+    # pure-Python parts, no KiCad needed
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -12,3 +13,18 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python tests/test_core.py
+
+  kicad:
+    # the whole flow on official KiCad images: API checks, demo board built and routed, DRC
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kicad: ["9.0", "10.0"]
+    container:
+      image: kicad/kicad:${{ matrix.kicad }}
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m kar doctor --demo
+      - run: python3 tests/test_kicad.py

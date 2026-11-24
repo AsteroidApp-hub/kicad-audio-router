@@ -7,6 +7,7 @@
   python -m kar auto     BOARD.kicad_pcb -o OUT.kicad_pcb [--out DIR]   # route + ground + DRC + report
   python -m kar bench    DIR [--out OUTDIR]          # strip + auto every board in DIR, compare with original
   python -m kar plot     BOARD.kicad_pcb -o OUT.svg                  # picture of the routing by net class
+  python -m kar doctor   [--demo]                                     # check this KiCad installation
   python -m kar strip    BOARD.kicad_pcb -o OUT.kicad_pcb            # remove tracks/vias (experiments)
   python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
@@ -376,6 +377,11 @@ def cmd_plot(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    from .doctor import main as doctor_main
+    return doctor_main(args.demo, args.json)
+
+
 def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
@@ -450,6 +456,10 @@ def main(argv=None) -> int:
     pl.add_argument("--layers", help="layers to draw (default: routing layers)")
     pl.add_argument("--title")
     pl.set_defaults(fn=cmd_plot)
+    dr = sub.add_parser("doctor", help="check that this KiCad offers what kar needs")
+    dr.add_argument("--demo", action="store_true", help="also build and route the demo board")
+    dr.add_argument("--json", action="store_true")
+    dr.set_defaults(fn=cmd_doctor)
     st = sub.add_parser("strip", help="remove tracks and vias")
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)

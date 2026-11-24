@@ -14,7 +14,8 @@ board, works out which nets are analog / digital / power / ground, and routes it
 - clearances are checked against the real copper shapes, per net class, including hole clearance
   and keep-out areas, so the result passes KiCad's DRC
 
-It is pure Python on top of KiCad's own `pcbnew` module (KiCad 8–10): no Java, no extra packages,
+It is pure Python on top of KiCad's own `pcbnew` module (tested on KiCad 10, KiCad 9 in CI; see
+[docs/compatibility.md](docs/compatibility.md)): no Java, no extra packages,
 deterministic (same board + rules = same result), with JSON output for scripted or AI-driven flows.
 
 ## Try it
@@ -77,6 +78,7 @@ if you want to start over. Always review the result in KiCad and run its DRC bef
 | `classify` | net classification with reasons |
 | `bench DIR` | strips and re-routes every board in a folder, compares with the original routing |
 | `plot` | SVG picture of the routing, one panel per layer, tracks coloured by net class |
+| `doctor` | checks that your KiCad offers what kar needs (`--demo`: also routes the demo board) |
 | `strip` | removes tracks and vias |
 | `finish` | optional: hands nets kar could not route to Freerouting (DSN/SES); not needed so far |
 
