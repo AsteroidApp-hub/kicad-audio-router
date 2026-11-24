@@ -257,10 +257,17 @@ def run_drc(board: str, out_json: str) -> dict | None:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with open(out_json, encoding="utf-8") as f:
         d = json.load(f)
+    import re
     types = collections.Counter(v["type"] for v in d.get("violations", []))
+    nets = collections.Counter()
+    for u in d.get("unconnected_items", []):
+        for it in u.get("items", []):
+            m = re.search(r"\[([^\]]+)\]", it.get("description", ""))
+            if m:
+                nets[m.group(1)] += 1
     return {"problems": {k: v for k, v in types.items() if k not in BENIGN_DRC},
             "benign": {k: v for k, v in types.items() if k in BENIGN_DRC},
-            "unconnected": len(d.get("unconnected_items", [])), "report": out_json}
+            "unconnected": len(d.get("unconnected_items", [])), "unconnected_nets": dict(nets), "report": out_json}
 
 
 def cmd_auto(args) -> int:
@@ -287,6 +294,18 @@ def cmd_auto(args) -> int:
         import shutil
         shutil.copy(routed, out)
     drc = run_drc(out, os.path.join(outdir, stem + "_drc.json"))
+    # ground nets that the pours/vias did not join (no plane layer): route them as tracks, then redo ground
+    if drc and drc["unconnected"] and gnd:
+        left = [n for n in gnd.split(",") if n in drc["unconnected_nets"]]
+        if left:
+            fixed = os.path.join(outdir, stem + "_gnd_routed.kicad_pcb")
+            ns2 = _ap.Namespace(**vars(ns))
+            ns2.board, ns2.output, ns2.classes, ns2.nets, ns2.no_fanout = out, fixed, "gnd", ",".join(left), True
+            cmd_route(ns2)
+            cmd_ground(_ap.Namespace(board=fixed, output=out, net=gnd, pour="", pour_clearance=0.3,
+                                     max_dist=3.0, max_radius=6.0, via=0.6, drill=0.3, clearance=args.clearance))
+            drc = run_drc(out, os.path.join(outdir, stem + "_drc.json"))
+            drc["ground_routed"] = left
     cmd_report(_ap.Namespace(board=out, rules=args.rules, out=outdir, json=True))
     with open(os.path.join(outdir, stem + "_quality.json"), encoding="utf-8") as f:
         q = json.load(f)

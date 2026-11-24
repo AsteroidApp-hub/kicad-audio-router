@@ -96,6 +96,9 @@ class Obstacles:
                 yield (i, j)
 
     def via_ok(self, x, y, r, net, clearance, own_pad: Pad | None = None) -> bool:
+        for ko in self.board.keepouts:
+            if ko.get("no_vias") and (_point_in_poly(x, y, ko["poly"]) or _poly_edge_dist(x, y, ko["poly"]) < r):
+                return False
         reach = r + clearance + 2.0
         for key in self._near_keys(x, y, reach):
             for p in self.pads.get(key, ()):
@@ -118,6 +121,10 @@ class Obstacles:
 
     def track_ok(self, x1, y1, x2, y2, w, layer, net, clearance, own_pad: Pad) -> bool:
         L = math.hypot(x2 - x1, y2 - y1)
+        for ko in self.board.keepouts:
+            if ko.get("no_tracks") and layer in ko["layers"] and any(
+                    _point_in_poly(x1 + (x2 - x1) * t / 8, y1 + (y2 - y1) * t / 8, ko["poly"]) for t in range(9)):
+                return False
         n = max(2, int(L / 0.1))
         bb = (min(x1, x2) - 2.5, min(y1, y2) - 2.5, max(x1, x2) + 2.5, max(y1, y2) + 2.5)
         segs = [s for s in self.segs.near(layer, bb) if s.net != net]

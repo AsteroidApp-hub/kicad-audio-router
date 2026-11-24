@@ -39,7 +39,7 @@ def from_pcbnew(kb, source: str = "") -> Board:
         f = Footprint(fp.GetReference(), fp.GetValue(), str(fp.GetFPID().GetLibItemName()))
         for p in fp.Pads():
             pos = p.GetPosition()
-            layers = tuple(kb.GetLayerName(l) for l in p.GetLayerSet().CuStack())
+            layers = tuple(n for n in (kb.GetLayerName(l) for l in p.GetLayerSet().CuStack()) if n in copper)
             pf = p.GetPinFunction() if hasattr(p, "GetPinFunction") else ""
             pt = p.GetPinType() if hasattr(p, "GetPinType") else ""
             if p.GetNetname():
@@ -65,9 +65,16 @@ def from_pcbnew(kb, source: str = "") -> Board:
             a, b = t.GetStart(), t.GetEnd()
             segs.append(Seg(_mm(a.x), _mm(a.y), _mm(b.x), _mm(b.y), _mm(t.GetWidth()),
                             kb.GetLayerName(t.GetLayer()), t.GetNetname()))
-    zones = []
+    zones, keepouts = [], []
     for z in kb.Zones():
         if z.GetIsRuleArea():
+            o = z.Outline()
+            for i in range(o.OutlineCount()):
+                ol = o.Outline(i)
+                keepouts.append({"poly": [(_mm(ol.CPoint(k).x), _mm(ol.CPoint(k).y)) for k in range(ol.PointCount())],
+                                 "layers": [kb.GetLayerName(l) for l in z.GetLayerSet().CuStack()],
+                                 "no_tracks": bool(z.GetDoNotAllowTracks()), "no_vias": bool(z.GetDoNotAllowVias()),
+                                 "no_pads": bool(z.GetDoNotAllowPads())})
             continue
         for l in z.GetLayerSet().CuStack():
             zones.append((z.GetNetname(), kb.GetLayerName(l)))
@@ -79,7 +86,12 @@ def from_pcbnew(kb, source: str = "") -> Board:
                 planes.append(kb.GetLayerName(l))
         except Exception:   # noqa: BLE001
             pass
-    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes, ncl)
+    try:
+        hole_cl = _mm(kb.GetDesignSettings().m_HoleClearance)
+    except Exception:   # noqa: BLE001
+        hole_cl = 0.0
+    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes, ncl, keepouts,
+                 hole_cl)
 
 
 def _area(poly) -> float:

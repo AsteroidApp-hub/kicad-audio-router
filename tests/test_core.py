@@ -141,6 +141,24 @@ def test_router_pair():
     assert rep["pairs"]["items"][0]["parallel_pct"] > 60, rep["pairs"]["items"]
 
 
+def test_uncommit_restores_grid():
+    from kar.router import RouteParams, RoutedNet, build_grid, _commit, _uncommit
+    b = _route_board()
+    rules = R.load(None)
+    cls = classify(b, rules)
+    prm = RouteParams(layers=["F.Cu", "B.Cu"])
+    g = build_grid(b, cls, prm, rules["activity_weight"])
+    occ0 = [bytes(o) for o in g.occ]
+    band0 = [bytes(x) for x in g.band]
+    rn = RoutedNet("/IN_H", [Seg(6, 10, 18, 10, 0.25, "F.Cu", "/IN_H"), Seg(18, 10, 18, 20, 0.25, "B.Cu", "/IN_H")],
+                   [(18.0, 10.0)], 0.25)
+    _commit(g, "/IN_H", "analog", rn.segs, rn.vias, prm, fields=False)
+    assert [bytes(o) for o in g.occ] != occ0
+    _uncommit(g, "/IN_H", rn, prm)
+    assert [bytes(o) for o in g.occ] == occ0
+    assert [bytes(x) for x in g.band] == band0
+
+
 def test_drop_nets():
     from kar.freerouting import drop_nets
     dsn = """(pcb x (network

@@ -78,10 +78,13 @@ class Board:
     outline: list[list[tuple[float, float]]] = field(default_factory=list)   # board outline polygon(s)
     plane_layers: list[str] = field(default_factory=list)   # inner layers typed "power" in the board setup
     net_clearance: dict[str, float] = field(default_factory=dict)   # net -> clearance from its net class
+    keepouts: list[dict] = field(default_factory=list)   # rule areas: {"poly", "layers", "no_tracks", "no_vias"}
+    hole_clearance: float = 0.0      # board rule: copper to holes (used for pads without a net, e.g. NPTH)
 
     def clearance(self, *nets: str, default: float = 0.2) -> float:
-        """Clearance needed between copper of these nets (the larger rule wins)."""
-        return max([default] + [self.net_clearance.get(n, 0.0) for n in nets])
+        """Clearance needed between copper of these nets (the larger rule wins). A pad without a net
+        (mounting / NPTH hole) needs the board's hole clearance."""
+        return max([default] + [self.net_clearance.get(n, 0.0) if n else self.hole_clearance for n in nets])
 
     @property
     def nets(self) -> set[str]:

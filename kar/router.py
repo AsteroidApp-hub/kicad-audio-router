@@ -41,8 +41,9 @@ class RouteParams:
     via_cost: float = 12.0            # in grid steps
     analog_via_cost: float = 30.0
     bend_cost: float = 0.4
-    width: dict = field(default_factory=lambda: {"analog": 0.25, "power": 0.5, "digital": 0.2, "other": 0.25})
-    narrow_width: dict = field(default_factory=lambda: {"power": 0.3})   # retry width when the wide one fails
+    width: dict = field(default_factory=lambda: {"analog": 0.25, "power": 0.5, "digital": 0.2, "other": 0.25,
+                                                 "gnd": 0.4})
+    narrow_width: dict = field(default_factory=lambda: {"power": 0.3, "gnd": 0.25})   # where the wide one fails
     near_mm: float = 3.0              # reach of the proximity cost fields
     near_cost: float = 6.0            # extra cost per step right next to the other kind (falls off linearly)
     pair_gap: float = 0.25            # target edge gap between the two sides of a pair
@@ -50,6 +51,8 @@ class RouteParams:
     pair_retry_below: float = 0.5     # if the sides run together less than this, try other orders/costs
     window_mm: float = 12.0           # search window around the net, widened once on failure
     rip_rounds: int = 3               # rip-up and reroute rounds for nets that failed
+    fine_fallback: bool = True        # nets that still fail are tried again on a grid twice as fine
+    phase: tuple[float, float] | None = None   # grid offset; default: aligned to most fine-pitch pads
     max_expand: int = 400_000         # node budget per search (fail fast instead of flooding the board)
     near_targets: int = 6             # heuristic looks at this many nearest remaining pads
     rip_radius: float = 2.0           # routed nets passing this close to a failed net's pads are ripped up
@@ -58,7 +61,8 @@ class RouteParams:
     push_cost_analog: float = 60.0    # ... through an analog track
     push_limit: int = 4               # how many times one net may push others
     local_rip: bool = False           # also try ripping up everything near a failed net's pads first
-    h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 1.2, "other": 1.5})
+    h_weight: dict = field(default_factory=lambda: {"analog": 1.0, "power": 1.5, "digital": 1.2, "other": 1.5,
+                                                    "gnd": 1.5})
     # >1 makes A* greedier (much faster on long nets, paths slightly longer than optimal)
     layers: list[str] | None = None   # routing layers (default: copper minus plane layers)
     classes: tuple[str, ...] = ("analog", "power", "digital", "other")
@@ -79,30 +83,92 @@ class RouteResult:
     skipped: list[str]
 
 
+def _grid_phase(board: Board, res: float, nets=None) -> tuple[float, float]:
+    """Grid offset that puts as many fine-pitch pad centres as possible exactly on grid points
+    (only pads of `nets` when given)."""
+    from collections import Counter
+    pads = [p for fp in board.footprints for p in fp.pads if p.smd and (nets is None or p.net in nets)]
+    fine = [p for p in pads if min(p.box()[2] - p.box()[0], p.box()[3] - p.box()[1]) < 0.45] or pads
+    if not fine:
+        return 0.0, 0.0
+    q = 0.005
+    cx = Counter(round((p.x % res) / q) * q for p in fine)
+    cy = Counter(round((p.y % res) / q) * q for p in fine)
+    return cx.most_common(1)[0][0], cy.most_common(1)[0][0]
+
+
+class Copper:
+    """Copper objects bucketed by layer and 1 mm cell; each object is put in every bucket its
+    clearance reach touches, so a query looks at one bucket only."""
+
+    def __init__(self, reach: float, cell: float = 1.0):
+        self.reach, self.cell = reach, cell
+        self.b: dict[tuple[int, int, int], list] = {}
+
+    def add(self, li: int, obj, bbox):
+        c, r = self.cell, self.reach
+        for i in range(math.floor((bbox[0] - r) / c), math.floor((bbox[2] + r) / c) + 1):
+            for j in range(math.floor((bbox[1] - r) / c), math.floor((bbox[3] + r) / c) + 1):
+                self.b.setdefault((li, i, j), []).append(obj)
+
+    def at(self, li: int, x: float, y: float):
+        return self.b.get((li, math.floor(x / self.cell), math.floor(y / self.cell)), ())
+
+    def clone(self) -> "Copper":
+        c = Copper(self.reach, self.cell)
+        c.b = {k: list(v) for k, v in self.b.items()}
+        return c
+
+
+def _obj_dist(obj, x: float, y: float) -> float:
+    """Distance from a point to an object's copper. obj = (kind, net_id, fixed, data)."""
+    k, _, _, d = obj
+    if k == "S":
+        x1, y1, x2, y2, hw = d
+        vx, vy = x2 - x1, y2 - y1
+        l2 = vx * vx + vy * vy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((x - x1) * vx + (y - y1) * vy) / l2))
+        return math.hypot(x1 + t * vx - x, y1 + t * vy - y) - hw
+    if k == "V":
+        return math.hypot(d[0] - x, d[1] - y) - d[2]
+    return d.dist(x, y)          # pad (real outline)
+
+
 class Grid:
     def __init__(self, board: Board, prm: RouteParams):
         self.prm = prm
         self.res = prm.res
         xs = [x for poly in board.outline for x, _ in poly] or [p.x for fp in board.footprints for p in fp.pads]
         ys = [y for poly in board.outline for _, y in poly] or [p.y for fp in board.footprints for p in fp.pads]
-        self.ox, self.oy = min(xs) - 1.0, min(ys) - 1.0
+        rx, ry = prm.phase if prm.phase is not None else _grid_phase(board, self.res)
+        self.ox = math.floor((min(xs) - 1.0 - rx) / self.res) * self.res + rx
+        self.oy = math.floor((min(ys) - 1.0 - ry) / self.res) * self.res + ry
         self.W = int(math.ceil((max(xs) + 1.0 - self.ox) / self.res)) + 1
         self.H = int(math.ceil((max(ys) + 1.0 - self.oy) / self.res)) + 1
         self.layers = prm.layers or [l for l in board.copper_layers if l not in board.plane_layers]
         self.L = len(self.layers)
         self.lidx = {n: i for i, n in enumerate(self.layers)}
         n = self.W * self.H
-        self.occ = [array("H", bytes(2 * n)) for _ in range(self.L)]
+        self.occ = [array("H", bytes(2 * n)) for _ in range(self.L)]     # copper owner (net id) / BLOCK
+        self.band = [bytearray(n) for _ in range(self.L)]                # near some copper: check exactly
         self.near_dig = [array("f", bytes(4 * n)) for _ in range(self.L)]
         self.near_ana = [array("f", bytes(4 * n)) for _ in range(self.L)]
+        self.novia = bytearray(n)
         self.net_id: dict[str, int] = {}
-        self.margin = self.res * 0.8         # discretisation safety
+        self.clr: dict[int, float] = {}                                  # net id -> class clearance
+        self.margin = self.res * 0.8
+        cmax = max([prm.clearance] + list(board.net_clearance.values()))
+        hwmax = max(list(prm.width.values()) + [prm.via_d]) / 2
+        self.reach = math.sqrt((cmax + hwmax) ** 2 + 0.5 * self.res ** 2) + 0.05
+        self.cu = Copper(self.reach)
 
     def clone(self) -> "Grid":
-        """Copy with fresh occupancy (from this grid) sharing the fixed map, ids and cost fields."""
+        """Copy with fresh occupancy / band / copper index sharing ids, fixed map and cost fields."""
         import copy
         g = copy.copy(self)
         g.occ = [array("H", o) for o in self.occ]
+        g.band = [bytearray(b) for b in self.band]
+        g.cu = self.cu.clone()
         return g
 
     # ---------------------------------------------------------------- coordinates
@@ -252,29 +318,79 @@ def _pad_layers(grid: Grid, p: Pad) -> list[int]:
     return [grid.lidx[l] for l in p.layers if l in grid.lidx]
 
 
+def _stamp_copper(g: Grid, li: int, val: int, inside, bbox, fixed: bool, obj):
+    """Mark copper cells (owner), the band within reach, and index the object."""
+    o, band, W, H = g.occ[li], g.band[li], g.W, g.H
+    r = g.reach
+    x0, y0 = g.cell(bbox[0] - r, bbox[1] - r)
+    x1, y1 = g.cell(bbox[2] + r, bbox[3] + r)
+    for cy in range(max(y0, 0), min(y1, H - 1) + 1):
+        for cx in range(max(x0, 0), min(x1, W - 1) + 1):
+            x, y = g.pos(cx, cy)
+            d = inside(x, y)
+            if d < r:
+                i = cy * W + cx
+                band[i] = 1
+                if d <= 1e-9:
+                    cur = o[i]
+                    o[i] = val if cur in (0, val) else BLOCK
+    g.cu.add(li, obj, bbox)
+
+
+def _add_pad(g: Grid, p: Pad, fixed: bool = True):
+    v = g.nid(p.net) if p.net else BLOCK
+    obj = ("P", v, fixed, p)
+    for li in _pad_layers(g, p):
+        _stamp_copper(g, li, v, p.dist, p.box(), fixed, obj)
+
+
+def _add_seg(g: Grid, li: int, s: Seg, fixed: bool):
+    v = g.nid(s.net)
+    hw = s.width / 2
+    obj = ("S", v, fixed, (s.x1, s.y1, s.x2, s.y2, hw))
+    _stamp_copper(g, li, v, lambda x, y: _obj_dist(obj, x, y), s.bbox(hw), fixed, obj)
+
+
+def _add_via(g: Grid, x: float, y: float, d: float, net: str, fixed: bool):
+    v = g.nid(net)
+    obj = ("V", v, fixed, (x, y, d / 2))
+    for li in range(g.L):
+        _stamp_copper(g, li, v, lambda px, py: math.hypot(px - x, py - y) - d / 2,
+                      (x - d / 2, y - d / 2, x + d / 2, y + d / 2), fixed, obj)
+
+
 def build_grid(board: Board, cls: Classification, prm: RouteParams, weights: dict) -> Grid:
     g = Grid(board, prm)
     g.ncl = board.net_clearance
-
-    def halo(net):
-        return board.clearance(net, default=prm.clearance) + g.margin
     pads = [p for fp in board.footprints for p in fp.pads]
-    # halos first (conflicts become BLOCK), then the copper itself (owned by its net)
     for p in pads:
-        val = g.nid(p.net) if p.net else BLOCK
-        for li in _pad_layers(g, p):
-            g.stamp_pad(li, p, val, halo(p.net))
+        _add_pad(g, p)
     for s in board.segs:
         if s.layer in g.lidx:
-            g.stamp_capsule(g.lidx[s.layer], s.x1, s.y1, s.x2, s.y2, s.width / 2 + halo(s.net), g.nid(s.net))
+            _add_seg(g, g.lidx[s.layer], s, True)
     for v in board.vias:
-        for li in range(g.L):
-            g.stamp_capsule(li, v.x, v.y, v.x, v.y, v.diameter / 2 + halo(v.net), g.nid(v.net))
-    for p in pads:
-        if p.net:
-            for li in _pad_layers(g, p):
-                g.stamp_pad(li, p, g.nid(p.net), 0.0, force=True)
+        _add_via(g, v.x, v.y, v.diameter, v.net, True)
+    for n, i in g.net_id.items():
+        g.clr[i] = board.clearance(n, default=prm.clearance)
+    g.clr[BLOCK] = board.clearance("", default=prm.clearance)     # pads without a net (holes)
     g.block_outside(board.outline)
+    # rule areas (keep-outs)
+    from .geometry import point_in_poly
+    for ko in board.keepouts:
+        xs = [q[0] for q in ko["poly"]]
+        ys = [q[1] for q in ko["poly"]]
+        x0, y0 = g.cell(min(xs), min(ys))
+        x1, y1 = g.cell(max(xs), max(ys))
+        for cy in range(max(y0, 0), min(y1, g.H - 1) + 1):
+            for cx in range(max(x0, 0), min(x1, g.W - 1) + 1):
+                if point_in_poly(*g.pos(cx, cy), ko["poly"]):
+                    i = cy * g.W + cx
+                    if ko["no_vias"]:
+                        g.novia[i] = 1
+                    if ko["no_tracks"]:
+                        for l in ko["layers"]:
+                            if l in g.lidx:
+                                g.occ[g.lidx[l]][i] = BLOCK
     g.fixed = [array("H", o) for o in g.occ]      # pads, existing copper, edges: never pushed aside
     # proximity fields from pads and existing copper
     reach = prm.near_mm
@@ -300,23 +416,26 @@ def build_grid(board: Board, cls: Classification, prm: RouteParams, weights: dic
     return g
 
 
+OK, FIXED = 0, -1
+
+
 class _Search:
-    """One A* search for one net between its current tree and the remaining pads."""
+    """One A* search for one net between its current tree and the remaining pads.
+
+    Clearance is checked exactly: a cell near copper (the band) is compared with the real shapes
+    around it. The check keeps sqrt(need^2 + res^2 / 2) from other copper, so the straight run
+    between two neighbouring cells (whose middle is up to 0.71 res away from both ends) also keeps
+    `need` = class clearance + half the track width."""
 
     def __init__(self, g: Grid, net: str, kind: str, width: float, prm: RouteParams,
                  pair_field: list[array] | None, act_w: float, push: dict[int, float] | None = None):
         self.g, self.net, self.kind, self.prm = g, net, kind, prm
         self.push = push           # net id -> cost per step to cross that net's routed track (None: hard)
-        self.hw = prm.h_weight.get(kind, 1.0)
-        self._push_cache: dict[int, float | None] = {}
-        self._pvia_cache: dict[int, float | None] = {}
+        self.hw = prm.h_weight.get(kind, 1.0)      # A* greediness
+        self.half = width / 2
         self.val = g.nid(net)
-        # tracks: the halo margin covers grid rounding. vias: half a cell more, because a via's copper
-        # reaches diagonal cells that the disk test does not sample
-        # a net whose class needs more clearance than the default keeps that extra distance itself
-        extra = max(0.0, getattr(g, "ncl", {}).get(net, 0.0) - prm.clearance)
-        self.track_disk = g.disk(width / 2 + extra)
-        self.via_disk = g.disk(prm.via_d / 2 + g.res * 0.5 + extra)
+        self.own_cl = max(prm.clearance, getattr(g, "ncl", {}).get(net, 0.0))
+        self.via_r = prm.via_d / 2
         self.via_cost = prm.analog_via_cost if kind == "analog" else prm.via_cost
         self.pair_field = pair_field
         if kind == "analog":
@@ -325,84 +444,108 @@ class _Search:
             self.field, self.fw = g.near_ana, prm.near_cost * act_w
         else:
             self.field, self.fw = None, 0.0
-        self._ok_cache: dict[int, bool] = {}
-        self._via_cache: dict[int, bool] = {}
+        self._t: dict[int, object] = {}      # track check cache: OK, FIXED or frozenset of routed net ids
+        self._v: dict[int, object] = {}      # via check cache
+        self._need: dict[tuple[int, float], float] = {}
 
-    def ok(self, li: int, cx: int, cy: int) -> bool:
-        g = self.g
-        key = (li * g.H + cy) * g.W + cx
-        r = self._ok_cache.get(key)
-        if r is not None:
-            return r
-        o, W, H, v = g.occ[li], g.W, g.H, self.val
-        r = True
-        for dx, dy in self.track_disk:
-            x, y = cx + dx, cy + dy
-            if not (0 <= x < W and 0 <= y < H):
-                r = False
-                break
-            c = o[y * W + x]
-            if c != 0 and c != v:
-                r = False
-                break
-        self._ok_cache[key] = r
+    def _need_e(self, nid: int, half: float) -> float:
+        key = (nid, half)
+        r = self._need.get(key)
+        if r is None:
+            c = max(self.own_cl, self.g.clr.get(nid, self.prm.clearance)) + half
+            r = math.sqrt(c * c + 0.5 * self.g.res ** 2)
+            self._need[key] = r
         return r
 
-    def via_ok(self, cx: int, cy: int) -> bool:
+    def _check(self, li: int, cx: int, cy: int, half: float, step_err: bool = True):
+        g = self.g
+        i = cy * g.W + cx
+        c = g.occ[li][i]
+        v = self.val
+        if c == BLOCK:
+            return FIXED
+        viol = None
+        if c != 0 and c != v:
+            if g.fixed[li][i] == c:
+                return FIXED
+            viol = {c}
+        if not g.band[li][i]:
+            return frozenset(viol) if viol else OK
+        x, y = g.pos(cx, cy)
+        for obj in g.cu.at(li, x, y):
+            nid = obj[1]
+            if nid == v:
+                continue
+            need = self._need_e(nid, half) if step_err else \
+                max(self.own_cl, g.clr.get(nid, self.prm.clearance)) + half
+            if obj[0] == "P":
+                b = obj[3].box()
+                dx = max(b[0] - x, 0.0, x - b[2])
+                dy = max(b[1] - y, 0.0, y - b[3])
+                if dx * dx + dy * dy >= need * need:
+                    continue
+            if _obj_dist(obj, x, y) < need - 1e-9:
+                if obj[2]:
+                    return FIXED
+                if viol is None:
+                    viol = set()
+                viol.add(nid)
+        return frozenset(viol) if viol else OK
+
+    def track_state(self, li: int, cx: int, cy: int):
+        key = (li * self.g.H + cy) * self.g.W + cx
+        r = self._t.get(key)
+        if r is None:
+            r = self._check(li, cx, cy, self.half)
+            self._t[key] = r
+        return r
+
+    def via_state(self, cx: int, cy: int):
         g = self.g
         key = cy * g.W + cx
-        r = self._via_cache.get(key)
+        r = self._v.get(key)
         if r is not None:
             return r
-        W, H, v = g.W, g.H, self.val
-        r = True
-        for li in range(g.L):
-            o = g.occ[li]
-            for dx, dy in self.via_disk:
+        r = OK
+        # keep-outs: no via whose copper reaches a no-via cell
+        k = int(math.ceil(self.via_r / g.res))
+        for dx in range(-k, k + 1):
+            for dy in range(-k, k + 1):
                 x, y = cx + dx, cy + dy
-                if not (0 <= x < W and 0 <= y < H):
-                    r = False
+                if not (0 <= x < g.W and 0 <= y < g.H) or (g.novia[y * g.W + x] and dx * dx + dy * dy <= k * k):
+                    r = FIXED
+        if r is OK:
+            acc = set()
+            for li in range(g.L):
+                s = self._check(li, cx, cy, self.via_r, step_err=False)
+                if s is FIXED:
+                    r = FIXED
                     break
-                c = o[y * W + x]
-                if c != 0 and c != v:
-                    r = False
-                    break
-            if not r:
-                break
-        self._via_cache[key] = r
+                if s is not OK:
+                    acc |= s
+            if r is OK and acc:
+                r = frozenset(acc)
+        self._v[key] = r
         return r
 
-    def _push_cost(self, layers, cx, cy, disk) -> float | None:
-        """Cost of pushing through routed copper at this spot, or None if fixed copper blocks it."""
-        g = self.g
-        W, H, v = g.W, g.H, self.val
-        worst = 0.0
-        for li in layers:
-            o, f = g.occ[li], g.fixed[li]
-            for dx, dy in disk:
-                x, y = cx + dx, cy + dy
-                if not (0 <= x < W and 0 <= y < H):
-                    return None
-                i = y * W + x
-                fc = f[i]
-                if fc != 0 and fc != v:
-                    return None
-                c = o[i]
-                if c != 0 and c != v:
-                    worst = max(worst, self.push.get(c, self.prm.push_cost_analog))
-        return worst
+    def ok(self, li: int, cx: int, cy: int) -> bool:
+        return self.track_state(li, cx, cy) is OK
+
+    def via_ok(self, cx: int, cy: int) -> bool:
+        return self.via_state(cx, cy) is OK
+
+    def _cost(self, st) -> float | None:
+        if st is OK:
+            return 0.0
+        if st is FIXED or self.push is None:
+            return None
+        return max(self.push.get(n, self.prm.push_cost_analog) for n in st)
 
     def push_step(self, li, cx, cy) -> float | None:
-        key = (li * self.g.H + cy) * self.g.W + cx
-        if key not in self._push_cache:
-            self._push_cache[key] = self._push_cost([li], cx, cy, self.track_disk)
-        return self._push_cache[key]
+        return self._cost(self.track_state(li, cx, cy))
 
     def push_via(self, cx, cy) -> float | None:
-        key = cy * self.g.W + cx
-        if key not in self._pvia_cache:
-            self._pvia_cache[key] = self._push_cost(range(self.g.L), cx, cy, self.via_disk)
-        return self._pvia_cache[key]
+        return self._cost(self.via_state(cx, cy))
 
     def run(self, sources: list[tuple[int, int, int]], targets: set[tuple[int, int, int]],
             tcenters: list[tuple[float, float]], window) -> list[tuple[int, int, int]] | None:
@@ -414,13 +557,6 @@ class _Search:
         hw = self.hw
         sq2m1 = SQ2 - 1
         tc = tcenters
-        okc = self._okc if getattr(self, "_okc", None) is not None else bytearray(L * WH)   # 0 ?, 1 ok, 2 no
-        self._okc = okc
-        vic = self._vic if getattr(self, "_vic", None) is not None else bytearray(WH)
-        self._vic = vic
-        occ = g.occ
-        val = self.val
-        tdisk = self.track_disk
         push = self.push
         fields = self.field
         fw = self.fw
@@ -429,6 +565,7 @@ class _Search:
         bend = prm.bend_cost
         via_cost = self.via_cost
         tgt = {(li * H + y) * W + x for li, x, y in targets}
+        track_state = self.track_state
 
         def h(x, y):
             best = 1e18
@@ -441,22 +578,7 @@ class _Search:
             return best * hw
 
         def cell_ok(nid, li, x, y):
-            c = okc[nid]
-            if c:
-                return c == 1
-            o = occ[li]
-            r = 1
-            for dx, dy in tdisk:
-                xx, yy = x + dx, y + dy
-                if not (0 <= xx < W and 0 <= yy < H):
-                    r = 2
-                    break
-                v = o[yy * W + xx]
-                if v != 0 and v != val:
-                    r = 2
-                    break
-            okc[nid] = r
-            return r == 1
+            return track_state(li, x, y) is OK
 
         gcost: dict[int, float] = {}
         came: dict[int, int] = {}
@@ -524,15 +646,11 @@ class _Search:
                     push_(heap, (ng + h(nx, ny), cnt, nid))
                     cnt += 1
             if L > 1:
-                vk = vic[rem]
-                if vk == 0:
-                    vk = 1 if self.via_ok(cx, cy) else 2
-                    vic[rem] = vk
-                vextra = 0.0
-                if vk == 2:
-                    if push is None:
-                        continue
-                    pv = self.push_via(cx, cy)
+                vs = self.via_state(cx, cy)
+                if vs is OK:
+                    vextra = 0.0
+                else:
+                    pv = self._cost(vs)
                     if pv is None:
                         continue
                     vextra = pv * 3
@@ -608,18 +726,64 @@ def _path_to_segs(g: Grid, path, net: str, width: float) -> tuple[list[Seg], lis
 
 
 def _commit(g: Grid, net: str, kind: str, segs: list[Seg], vias, prm: RouteParams, fields: bool = True):
-    val = g.nid(net)
-    halo = max(prm.clearance, getattr(g, "ncl", {}).get(net, 0.0)) + g.margin
     for s in segs:
         li = g.lidx[s.layer]
-        g.stamp_capsule(li, s.x1, s.y1, s.x2, s.y2, s.width / 2 + halo, val)
-        g.stamp_capsule(li, s.x1, s.y1, s.x2, s.y2, s.width / 2, val, force=True)
+        _add_seg(g, li, s, False)
         if kind == "analog" and fields:
             g.field_capsule(g.near_ana[li], s.x1, s.y1, s.x2, s.y2, prm.near_mm, 1.0)
     for x, y in vias:
+        _add_via(g, x, y, prm.via_d, net, False)
+    nid = g.nid(net)
+    if nid not in g.clr:
+        g.clr[nid] = max(prm.clearance, getattr(g, "ncl", {}).get(net, 0.0))
+
+
+def _uncommit(g: Grid, net: str, rn: RoutedNet, prm: RouteParams):
+    """Take a routed net's tracks and vias out of the grid: drop its objects from the copper index and
+    recompute owner / band for the cells they could have touched."""
+    nid = g.nid(net)
+    gone_s = {(s.x1, s.y1, s.x2, s.y2, s.width / 2) for s in rn.segs}
+    gone_v = {(x, y, prm.via_d / 2) for x, y in rn.vias}
+    regions = []   # (layer, bbox)
+    for s in rn.segs:
+        regions.append((g.lidx[s.layer], s.bbox(s.width / 2)))
+    for x, y in rn.vias:
+        r = prm.via_d / 2
         for li in range(g.L):
-            g.stamp_capsule(li, x, y, x, y, prm.via_d / 2 + halo, val)
-            g.stamp_capsule(li, x, y, x, y, prm.via_d / 2, val, force=True)
+            regions.append((li, (x - r, y - r, x + r, y + r)))
+
+    def doomed(o):
+        return o[1] == nid and not o[2] and ((o[0] == "S" and o[3] in gone_s) or (o[0] == "V" and o[3] in gone_v))
+    c, R = g.cu.cell, g.cu.reach
+    for li, bb in regions:
+        for i in range(math.floor((bb[0] - R) / c), math.floor((bb[2] + R) / c) + 1):
+            for j in range(math.floor((bb[1] - R) / c), math.floor((bb[3] + R) / c) + 1):
+                lst = g.cu.b.get((li, i, j))
+                if lst:
+                    g.cu.b[(li, i, j)] = [o for o in lst if not doomed(o)]
+    W, H = g.W, g.H
+    seen = set()
+    for li, bb in regions:
+        o_, band, fx = g.occ[li], g.band[li], g.fixed[li]
+        x0, y0 = g.cell(bb[0] - R, bb[1] - R)
+        x1, y1 = g.cell(bb[2] + R, bb[3] + R)
+        for cy in range(max(y0, 0), min(y1, H - 1) + 1):
+            for cx in range(max(x0, 0), min(x1, W - 1) + 1):
+                i = cy * W + cx
+                if (li, i) in seen:
+                    continue
+                seen.add((li, i))
+                x, y = g.pos(cx, cy)
+                own = fx[i]
+                near = 0
+                for ob in g.cu.at(li, x, y):
+                    d = _obj_dist(ob, x, y)
+                    if d < R:
+                        near = 1
+                        if d <= 1e-9 and not ob[2] and fx[i] == 0:
+                            own = ob[1] if own in (0, ob[1]) else BLOCK
+                o_[i] = own
+                band[i] = near        # the index holds fixed and routed copper alike
 
 
 def _pair_band(g: Grid, segs: list[Seg], width: float, prm: RouteParams) -> list[array]:
@@ -667,10 +831,13 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         tys = ys + [c[2] for c, k in targets.items() if k in near_ids]
         path, used_w = None, widths[0]
         for srch, w in zip(searches, widths):
+            # start only where this track width keeps its clearance (a wide track starting at a pad's
+            # edge cell would stick out of the pad towards its neighbours)
+            src = [c for c in tree if srch.track_state(*c) is OK] or sorted(tree)
             for grow in (prm.window_mm, prm.window_mm * 4):
                 m = int(grow / g.res)
                 win = (max(min(txs) - m, 0), max(min(tys) - m, 0), min(max(txs) + m, g.W - 1), min(max(tys) + m, g.H - 1))
-                path = srch.run(sorted(tree), set(targets), tcent, win)
+                path = srch.run(sorted(src), set(targets), tcent, win)
                 if path:
                     break
             if path:
@@ -721,7 +888,9 @@ def _crossed(new: RoutedNet, done: dict[str, RoutedNet], prm: RouteParams) -> li
 
 
 def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, nets: list[str] | None = None,
-          progress=None) -> RouteResult:
+          progress=None, prerouted: dict | None = None) -> RouteResult:
+    """Route `nets` (default: all of prm.classes). `prerouted` routes are laid down first as ordinary
+    (pushable) tracks; with it, the result lists every route, rerouted ones included."""
     base = build_grid(board, cls, prm, weights)     # pads, existing copper, edges, fields (built once)
     g = base.clone()
     pads_by_net = board.pads_by_net()
@@ -742,6 +911,9 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     failed, skipped = [], []
     done: dict[str, RoutedNet] = {}
     partner_of = {b: a for a, b in pairs}
+    for n, rn in (prerouted or {}).items():
+        _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False)
+        done[n] = rn
 
     def attempt(g, net, partner):
         kind = cls.kind.get(net, "other")
@@ -760,7 +932,8 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     todo = []
     for net, partner in order:
         pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
-        if len(pads) < 2 or net in already:
+        # ground nets may already carry fan-out stubs; they are only routed when asked for explicitly
+        if len(pads) < 2 or (net in already and cls.kind.get(net) != "gnd"):
             skipped.append(net)
         else:
             todo.append((net, partner))
@@ -889,13 +1062,34 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         victims = with_partners(_crossed(res, done, prm))
         victims = [v for v in victims if v != net]
         for v in victims:
-            done.pop(v, None)
+            rv = done.pop(v, None)
+            if rv is not None:
+                _uncommit(g, v, rv, prm)
         done[net] = res
-        g = rebuild(done)
+        _commit(g, net, kind, res.segs, res.vias, prm)
         if progress:
             progress(f"{net} (pushed {len(victims)}: {', '.join(victims[:4])})", True)
         queue += reroute(g, victims)
     failed = sorted(set(failed))
+
+    # 3) finer grid for what is left (fine-pitch parts such as USB-C, SSOP), one net at a time with the
+    #    grid aligned to its pads; the routes so far stay pushable so a walled-in pin can be freed
+    if failed and prm.fine_fallback and prm.res > 0.15:
+        import copy
+        p2 = copy.copy(prm)
+        p2.res, p2.fine_fallback, p2.rip_time_s = prm.res / 2, False, min(prm.rip_time_s, 120.0)
+        if progress:
+            progress(f"fine grid {p2.res} mm for {len(failed)} nets", True)
+        still = []
+        for net in failed:
+            p3 = copy.copy(p2)
+            p3.phase = _grid_phase(board, p2.res, {net})
+            r2 = route(board, cls, p3, weights, nets=[net], progress=progress, prerouted=dict(done))
+            done = {rn.net: rn for rn in r2.routed}
+            still += r2.failed
+        failed = sorted(set(still))
+    if prerouted is not None:
+        return RouteResult(list(done.values()), failed, skipped)
     routed = [done[n] for n, _ in todo if n in done]
     return RouteResult(routed, failed, skipped)
 
