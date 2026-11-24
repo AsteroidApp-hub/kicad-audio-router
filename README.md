@@ -39,7 +39,7 @@ stripped of all tracks and routed from scratch with `kar auto`, compared with th
 
 | board | layers | original | kar | time |
 |---|---|---|---|---|
-| monitor controller (~270 parts, relays, MUSES72320) | 4 | 53.4 | 78.6 | 233 s |
+| monitor controller (~270 parts, relays, MUSES72320) | 4 | 53.4 | 83.5 | 152 s |
 | VU meter (USB-C) | 2 | 80.8 | 92.2 | 40 s |
 | tape saturator | 4 | 81.1 | 91.1 | 70 s |
 | P48 phantom supply | 4 | 82.5 | 85.0 | 32 s |
