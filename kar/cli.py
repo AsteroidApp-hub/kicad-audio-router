@@ -149,7 +149,24 @@ def cmd_route(args) -> int:
     from . import kicad_io
     from .classify import classify
     from .router import RouteParams, route
-    board, kb = kicad_io.load(args.board)
+    ripped = 0
+    src = args.board
+    if getattr(args, "rip_kar", False):
+        # take out what kar placed before; hand-routed copper (and anything taken out of the kar groups)
+        # stays and is routed around, nets left partly connected are completed. Done in a separate
+        # process: after group edits the Python bindings of this process cannot be trusted.
+        import subprocess
+        tmp = os.path.splitext(args.output or args.board)[0] + "_ripped.kicad_pcb"
+        cmd = [sys.executable, "-m", "kar", "strip", args.board, "-o", tmp, "--kar-only"]
+        if args.nets:
+            cmd += ["--nets", args.nets]
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        t = r.stdout
+        info = json.loads(t[t.find("{"):t.rfind("}") + 1]) if "{" in t else {}
+        ripped = info.get("removed", 0)
+        src = tmp
+    board, kb = kicad_io.load(src)
     rules = R.load(args.rules)
     cls = classify(board, rules)
     prm = RouteParams(res=args.grid, clearance=args.clearance)
@@ -202,7 +219,7 @@ def cmd_route(args) -> int:
     kicad_io.refill(kb)
     out = args.output or args.board
     kicad_io.save(kb, out, args.board)
-    summary = {"saved": out, "log": log_files, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
+    summary = {"saved": out, "log": log_files, "ripped": ripped, "ground_fanout": fan, "routed": len(res.routed), "failed": res.failed,
                "tracks": nt, "vias": nv,
                "layers": prm.layers or [l for l in board.copper_layers if l not in board.plane_layers],
                "seconds": round(time.time() - t0, 1), "stats": res.stats}
@@ -294,7 +311,7 @@ def cmd_auto(args) -> int:
     routed = os.path.join(outdir, stem + "_routed.kicad_pcb")
     ns = _ap.Namespace(board=args.board, output=routed, rules=args.rules, classes=args.classes, nets=None,
                        layers=args.layers, grid=args.grid, clearance=args.clearance, no_lock=args.no_lock,
-                       no_fanout=False, fanout_dist=1.0, json=True, log=outdir)
+                       no_fanout=False, fanout_dist=1.0, json=True, log=outdir, rip_kar=args.rip_kar)
     rc_route = cmd_route(ns)
     from . import kicad_io
     from .classify import classify
@@ -317,6 +334,7 @@ def cmd_auto(args) -> int:
             fixed = os.path.join(outdir, stem + "_gnd_routed.kicad_pcb")
             ns2 = _ap.Namespace(**vars(ns))
             ns2.board, ns2.output, ns2.classes, ns2.nets, ns2.no_fanout = out, fixed, "gnd", ",".join(left), True
+            ns2.rip_kar = False          # keep what was just routed
             cmd_route(ns2)
             cmd_ground(_ap.Namespace(board=fixed, output=out, net=gnd, pour="", pour_clearance=0.3,
                                      max_dist=3.0, max_radius=6.0, via=0.6, drill=0.3, clearance=args.clearance))
@@ -396,7 +414,11 @@ def cmd_doctor(args) -> int:
 def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
-    n = kicad_io.strip(kb, keep_locked=args.keep_locked)
+    if args.kar_only:
+        only = {n.strip() for n in args.nets.split(",")} if args.nets else None
+        n = kicad_io.strip_groups(kb, nets=only)
+    else:
+        n = kicad_io.strip(kb, keep_locked=args.keep_locked)
     kicad_io.save(kb, args.output, args.board)
     print(json.dumps({"removed": n, "saved": args.output}))
     return 0
@@ -434,6 +456,8 @@ def main(argv=None) -> int:
     r.add_argument("--fanout-dist", type=float, default=1.0,
                    help="before routing, ground pads without a ground via this close get one (default 1 mm)")
     r.add_argument("--log", help="write a route log (<board>_route.md / .json) to this folder")
+    r.add_argument("--rip-kar", action="store_true",
+                   help="first remove the copper kar placed before (PCB groups 'kar: ...'), keep the rest")
     r.add_argument("--json", action="store_true")
     r.set_defaults(fn=cmd_route)
     fz = sub.add_parser("finish", help="route what is left with Freerouting, keeping locked tracks")
@@ -457,6 +481,8 @@ def main(argv=None) -> int:
     a.add_argument("--grid", type=float, default=0.25)
     a.add_argument("--clearance", type=float, default=0.2)
     a.add_argument("--no-lock", action="store_true")
+    a.add_argument("--rip-kar", action="store_true",
+                   help="re-route: remove the copper kar placed before, keep hand-routed copper, route the rest")
     a.set_defaults(fn=cmd_auto)
     bn = sub.add_parser("bench", help="re-route every board in a folder and compare with the original")
     bn.add_argument("dir")
@@ -478,6 +504,8 @@ def main(argv=None) -> int:
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)
     st.add_argument("--keep-locked", action="store_true")
+    st.add_argument("--kar-only", action="store_true", help="remove only what kar placed (PCB groups 'kar: ...')")
+    st.add_argument("--nets", help="with --kar-only: only these nets")
     st.set_defaults(fn=cmd_strip)
     g = sub.add_parser("ground", help="ground pours, fan-out vias and island repair")
     g.add_argument("board")

@@ -57,6 +57,19 @@ $KPY -m kar report   board.kicad_pcb --out out/              # 品質レポー�
 
 部品は先に配置しておいてください (kar は部品を動かしません)。すでにある線は残します。最初から引き直したいときは `kar strip` で線を消してください。発注の前には必ず KiCad で結果を見て、DRC をかけてください。
 
+### 手で直してから引き直す
+
+1. `kar auto` で配線し、KiCad で結果を見て、気に入らない所を直す。線を動かす、引き直す、消す、いくつかのネットを自分で引く、などができる
+2. kar が置いた線をそのまま残したいときは、KiCad でその線を `kar: ...` のグループから外す (グループから削除)。自分で引いた線はもともとグループに入っていない
+3. `--rip-kar` を付けて、もう一度実行する
+
+   ```sh
+   $KPY -m kar auto board.kicad_pcb -o board_v2.kicad_pcb --rip-kar
+   $KPY -m kar route board.kicad_pcb -o board_v2.kicad_pcb --rip-kar --nets /SCLK,/SDATA   # このネットだけ
+   ```
+
+   kar はまだグループに入っている銅箔を消し、それ以外はそのまま残して (押しのけもしない)、残りを配線する。途中まで手で引いたネットは、残っている銅箔から続けて完成させる
+
 ### 結果の確かめ方
 
 - kar が置いた線とビアは、`kar: analog`、`kar: digital`、`kar: power`、`kar: ground`、`kar: other` という名前の PCB グループに入る。KiCad でグループをクリックすると、その種類の銅箔をまとめて選べる

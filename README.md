@@ -67,6 +67,22 @@ $KPY -m kar report   board.kicad_pcb --out out/              # quality report (M
 Place the parts first (kar does not move footprints). Existing tracks are kept; `kar strip` removes them
 if you want to start over. Always review the result in KiCad and run its DRC before ordering.
 
+### Fixing things by hand, then re-routing
+
+1. Route with `kar auto`, look at the result in KiCad and change what you do not like: move or redraw
+   tracks, delete them, route a few nets yourself.
+2. To keep a track kar placed exactly as it is, take it out of its `kar: ...` group in KiCad
+   (Remove from group). Tracks you draw yourself are not in a group anyway.
+3. Run again with `--rip-kar`:
+
+   ```sh
+   $KPY -m kar auto board.kicad_pcb -o board_v2.kicad_pcb --rip-kar
+   $KPY -m kar route board.kicad_pcb -o board_v2.kicad_pcb --rip-kar --nets /SCLK,/SDATA   # only these nets
+   ```
+
+   kar removes the copper still in its groups, keeps everything else as it is (it is not pushed aside), and
+   routes the rest. Nets that are partly routed by hand are completed from the copper that is there.
+
 ### Reviewing the result
 
 - Everything kar places goes into PCB groups named `kar: analog`, `kar: digital`, `kar: power`,

@@ -211,6 +211,23 @@ def test_pairs_need_matching_parts():
     assert not any("/B_HOT" in p for p in pairs)  # HOT goes to a clip, COLD to diodes
 
 
+def test_connected_groups():
+    from kar.connect import groups
+    from kar.model import Board, Footprint, Pad, Via
+
+    def pad(ref, x, y):
+        return Pad(ref, "1", "/N", x, y, True, ("F.Cu",), bbox=(x - 0.5, y - 0.5, x + 0.5, y + 0.5))
+    fps = [Footprint("A", "", "x", [pad("A", 0, 0)]), Footprint("B", "", "x", [pad("B", 10, 0)]),
+           Footprint("C", "", "x", [pad("C", 20, 0)])]
+    # A--B joined on F.Cu; C alone; a via + B.Cu stub hanging off B
+    segs = [Seg(0, 0, 10, 0, 0.25, "F.Cu", "/N"), Seg(10, 0, 12, 3, 0.25, "B.Cu", "/N")]
+    vias = [Via(10, 0, "/N", 0.6, 0.3)]
+    b = Board(fps, segs, vias, ["F.Cu", "B.Cu"])
+    gs = groups(b, "/N")
+    sizes = sorted((len(g["pads"]), len(g["segs"]), len(g["vias"])) for g in gs)
+    assert sizes == [(1, 0, 0), (2, 2, 1)], sizes
+
+
 def test_drop_nets():
     from kar.freerouting import drop_nets
     dsn = """(pcb x (network

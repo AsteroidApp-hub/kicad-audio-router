@@ -910,13 +910,57 @@ def _pair_band(g: Grid, segs: list[Seg], width: float, prm: RouteParams) -> list
     return out
 
 
-def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: RouteParams,
+class Terminal:
+    """Something the router connects: a pad, or a group of copper already joined (pads, tracks, vias)."""
+
+    def __init__(self, key, cells: set, x: float, y: float):
+        self.key, self.cells, self.x, self.y = key, cells, x, y
+
+    @staticmethod
+    def of_pad(g: "Grid", p: Pad) -> "Terminal":
+        return Terminal((p.ref, p.number, p.x, p.y), _pad_cells(g, p), p.x, p.y)
+
+    @staticmethod
+    def of_group(g: "Grid", grp: dict) -> "Terminal":
+        cells: set = set()
+        for p in grp["pads"]:
+            cells |= _pad_cells(g, p)
+        for sg in grp["segs"]:
+            if sg.layer not in g.lidx:
+                continue
+            li = g.lidx[sg.layer]
+            n = max(1, int(sg.length / (g.res / 2)))
+            for k in range(n + 1):
+                t = k / n
+                cx, cy = g.cell(sg.x1 + t * (sg.x2 - sg.x1), sg.y1 + t * (sg.y2 - sg.y1))
+                if 0 <= cx < g.W and 0 <= cy < g.H:
+                    cells.add((li, cx, cy))
+        for v in grp["vias"]:
+            cx, cy = g.cell(v.x, v.y)
+            if 0 <= cx < g.W and 0 <= cy < g.H:
+                cells |= {(li, cx, cy) for li in range(g.L)}
+        if grp["pads"]:
+            p = sorted(grp["pads"], key=lambda q: (q.ref, q.number))[0]
+            key, x, y = (p.ref, p.number, p.x, p.y), p.x, p.y
+        elif grp["segs"]:
+            sg = grp["segs"][0]
+            key, x, y = ("~", "", sg.x1, sg.y1), sg.x1, sg.y1
+        else:
+            v = grp["vias"][0]
+            key, x, y = ("~", "", v.x, v.y), v.x, v.y
+        return Terminal(key, cells, x, y)
+
+
+def route_net(g: Grid, board_pads: list, net: str, kind: str, width, prm: RouteParams,
               pair_field=None, act_w: float = 1.0, push: dict[int, float] | None = None,
               first_of_pair: bool = False, why: list | None = None) -> RoutedNet | None:
     """Grow a tree over the net's pads. `width` may be a list: each connection tries the widths in
     order (e.g. a power net goes narrow only where the wide track does not fit)."""
     widths = list(width) if isinstance(width, (list, tuple)) else [width]
-    pads = sorted(board_pads, key=lambda p: (p.ref, p.number))
+    # pads, or Terminals (groups of copper already joined, for nets that are partly routed)
+    pads = sorted((t if isinstance(t, Terminal) else Terminal.of_pad(g, t) for t in board_pads),
+                  key=lambda t: t.key)
+    pads = [t for t in pads if t.cells]
     if len(pads) < 2:
         return None
     searches = [_Search(g, net, kind, w, prm, pair_field, act_w, push) for w in widths]
@@ -924,13 +968,13 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         for sr, w in zip(searches, widths):
             sr.room = prm.pair_room_cost
             sr._room_k = max(1, int(round((w + prm.clearance + g.margin + w / 2) / g.res)))
-    tree: set[tuple[int, int, int]] = set(_pad_cells(g, pads[0]))
+    tree: set[tuple[int, int, int]] = set(pads[0].cells)
     remaining = list(pads[1:])
     all_segs, all_vias = [], []
     while remaining:
         targets: dict[tuple[int, int, int], int] = {}
         for k, p in enumerate(remaining):
-            for c in _pad_cells(g, p):
+            for c in p.cells:
                 targets.setdefault(c, k)
         xs = [c[1] for c in tree]
         ys = [c[2] for c in tree]
@@ -950,7 +994,7 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         # (fine-pitch pins off the grid phase; the fine-grid fallback handles them)
         if push is None:
             # each pad's own cells (pads of one net may overlap, e.g. mounting holes, USB-C VBUS/GND pins)
-            own_cells = {k: _pad_cells(g, remaining[k]) for k in near_ids}
+            own_cells = {k: remaining[k].cells for k in near_ids}
             reachable = lambda srch, k: any(srch.track_state(*c) is OK for c in own_cells[k])
             if not all(any(reachable(srch, k) for srch in searches) for k in near_ids):
                 if why is not None:
@@ -981,7 +1025,7 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         all_vias += vias
         tree.update(path)
         hit = remaining[targets[path[-1]]]
-        tree.update(_pad_cells(g, hit))
+        tree.update(hit.cells)
         remaining.remove(hit)
     return RoutedNet(net, all_segs, all_vias, widths[0])
 
@@ -1052,6 +1096,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     done: dict[str, RoutedNet] = {}
     partner_of = {b: a for a, b in pairs}
     pin_bound: set[str] = set()     # nets that failed because no grid cell sits on one of their pins
+    partial: dict[str, list] = {}   # nets partly routed already -> their groups of joined copper
     frozen: dict[str, RoutedNet] = {}
     wbox = prm.window
     for n, rn in (prerouted or {}).items():
@@ -1065,9 +1110,16 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False, fixed=True)
             frozen[n] = rn
 
+    def terms(g, net):
+        """What to connect: the net's pads, or, for a net that is partly routed already, the groups of
+        copper that are joined so far."""
+        if net in partial:
+            return [Terminal.of_group(g, grp) for grp in partial[net]]
+        return [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
+
     def attempt(g, net, partner, first_of_pair=False):
         kind = cls.kind.get(net, "other")
-        pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
+        pads = terms(g, net)
         widths = prm.widths_for(net, kind)
         pf = _pair_band(g, done[partner].segs, done[partner].width, prm) if partner in done else None
         why: list = []
@@ -1084,11 +1136,19 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     todo = []
     for net, partner in order:
         pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
-        # ground nets may already carry fan-out stubs; they are only routed when asked for explicitly
-        if len(pads) < 2 or (net in already and cls.kind.get(net) != "gnd"):
+        if len(pads) < 2:
             skipped.append(net)
-        else:
-            todo.append((net, partner))
+            continue
+        if net in already and cls.kind.get(net) != "gnd":
+            # partly routed (by hand, or by an earlier run): join the groups of copper that exist
+            from .connect import groups as copper_groups
+            grs = [gr for gr in copper_groups(board, net)
+                   if any(any(l in g.lidx for l in p.layers) for p in gr["pads"]) or gr["segs"] or gr["vias"]]
+            if len(grs) <= 1:
+                skipped.append(net)          # already complete
+                continue
+            partial[net] = grs
+        todo.append((net, partner))
     def together(a: RoutedNet, b: RoutedNet) -> float:
         from .geometry import SegIndex, coupled_length
         la = sum(s.length for s in a.segs) or 1.0
@@ -1124,6 +1184,8 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
     early_stats: dict = {}
     if prm.fine_fallback and prm.res > 0.15 and prerouted is None:
         def pin_bound_net(n):
+            if n in partial:
+                return False
             kind = cls.kind.get(n, "other")
             w = min(prm.widths_for(n, kind))   # narrowest it may use
             srch = _Search(g, n, kind, w, prm, None, 1.0)
@@ -1255,7 +1317,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         # pushing a net means re-routing it: big nets (many pads) are dearer, analog dearer still
         id_cost = {g.nid(n): (prm.push_cost_analog if cls.kind.get(n) == "analog" else prm.push_cost)
                    * max(1.0, len(pads_by_net.get(n, [])) / 4.0) for n in done}
-        pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
+        pads = terms(g, net)
         pf = _pair_band(g, done[partner_of[net]].segs, done[partner_of[net]].width, prm) \
             if partner_of.get(net) in done else None
         res = route_net(g, pads, net, kind, prm.widths_for(net, kind)[-1], prm, pf,
@@ -1355,7 +1417,7 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             _uncommit(g, n, old, prm)
             id_cost = {g.nid(m): (prm.push_cost_analog if cls.kind.get(m) == "analog" else prm.push_cost)
                        * max(1.0, len(pads_by_net.get(m, [])) / 4.0) for m in done}
-            pads = [p for p in pads_by_net.get(n, []) if any(l in g.lidx for l in p.layers)]
+            pads = terms(g, n)
             res = route_net(g, pads, n, kind, prm.widths_for(n, kind), prm,
                             None, weights.get(cls.activity.get(n, "data"), 1.0), id_cost)
             why = "no route" if res is None else ""

@@ -352,3 +352,22 @@ def strip(kb, keep_locked: bool = False) -> int:
     for t in gone:
         kb.Delete(t)
     return len(gone)
+
+
+def strip_groups(kb, prefix: str = "kar: ", nets: set | None = None) -> int:
+    """Remove the tracks and vias kar placed (items in PCB groups named `prefix...`), optionally only of
+    some nets. Copper outside those groups (hand-routed, or taken out of the group in KiCad) stays."""
+    gone = []
+    for g in list(kb.Groups()):
+        if not g.GetName().startswith(prefix):
+            continue
+        for it in list(g.GetItems()):
+            if it.GetClass() in ("PCB_TRACK", "PCB_VIA", "PCB_ARC") and (nets is None or it.GetNetname() in nets):
+                g.RemoveItem(it)
+                gone.append(it)
+    for it in gone:
+        kb.Delete(it)
+    for g in list(kb.Groups()):
+        if g.GetName().startswith(prefix) and not list(g.GetItems()):
+            kb.Remove(g)
+    return len(gone)
