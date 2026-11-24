@@ -831,6 +831,12 @@ def route_net(g: Grid, board_pads: list[Pad], net: str, kind: str, width, prm: R
         txs = xs + [c[1] for c, k in targets.items() if k in near_ids]
         tys = ys + [c[2] for c, k in targets.items() if k in near_ids]
         path, used_w = None, widths[0]
+        # a pad with no cell this track can stand on cannot be reached on this grid: give up at once
+        # (fine-pitch pins off the grid phase; the fine-grid fallback handles them)
+        if push is None:
+            reachable = lambda srch, k: any(srch.track_state(*c) is OK for c, kk in targets.items() if kk == k)
+            if not all(any(reachable(srch, k) for srch in searches) for k in near_ids):
+                return None
         for srch, w in zip(searches, widths):
             # start only where this track width keeps its clearance (a wide track starting at a pad's
             # edge cell would stick out of the pad towards its neighbours)
