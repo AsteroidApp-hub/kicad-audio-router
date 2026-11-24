@@ -2,6 +2,8 @@
 
   python -m kar classify BOARD.kicad_pcb [--rules R.json]          # how nets were classified
   python -m kar report   BOARD.kicad_pcb [--rules R.json] [--out DIR] [--json]
+  python -m kar route    BOARD.kicad_pcb [--classes analog,power,digital,other] [--nets A,B] [-o OUT]
+  python -m kar strip    BOARD.kicad_pcb -o OUT.kicad_pcb            # remove tracks/vias (experiments)
   python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
 Run with KiCad's bundled Python (needs pcbnew).
@@ -109,6 +111,45 @@ def cmd_ground(args) -> int:
     return 2 if bad else 0
 
 
+def cmd_route(args) -> int:
+    import time
+    from . import kicad_io
+    from .classify import classify
+    from .router import RouteParams, route
+    board, kb = kicad_io.load(args.board)
+    rules = R.load(args.rules)
+    cls = classify(board, rules)
+    prm = RouteParams(res=args.grid, clearance=args.clearance)
+    if args.layers:
+        prm.layers = [l.strip() for l in args.layers.split(",")]
+    prm.classes = tuple(c.strip() for c in args.classes.split(",") if c.strip())
+    nets = [n.strip() for n in args.nets.split(",")] if args.nets else None
+    t0 = time.time()
+
+    def prog(net, ok):
+        if not args.json:
+            print(f"  {'ok  ' if ok else 'FAIL'} {net}  ({time.time() - t0:.0f}s)", file=sys.stderr)
+    res = route(board, cls, prm, rules["activity_weight"], nets, prog)
+    nt, nv = kicad_io.apply_routes(kb, res.routed, prm.via_d, prm.via_drill, lock=not args.no_lock)
+    kicad_io.refill(kb)
+    out = args.output or args.board
+    kicad_io.save(kb, out)
+    summary = {"saved": out, "routed": len(res.routed), "failed": res.failed, "tracks": nt, "vias": nv,
+               "layers": prm.layers or [l for l in board.copper_layers if l not in board.plane_layers],
+               "seconds": round(time.time() - t0, 1)}
+    print(json.dumps(summary, ensure_ascii=False, indent=1))
+    return 0 if not res.failed else 2
+
+
+def cmd_strip(args) -> int:
+    from . import kicad_io
+    _, kb = kicad_io.load(args.board)
+    n = kicad_io.strip(kb, keep_locked=args.keep_locked)
+    kicad_io.save(kb, args.output)
+    print(json.dumps({"removed": n, "saved": args.output}))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="kar", description="kicad-audio-router: audio-aware routing helpers for KiCad")
     ap.add_argument("--version", action="version", version=__version__)
@@ -122,6 +163,23 @@ def main(argv=None) -> int:
         if name == "report":
             p.add_argument("--out", help="write <board>_quality.json / .md here")
         p.set_defaults(fn=fn)
+    r = sub.add_parser("route", help="audio-aware routing (pairs, analog, power, digital)")
+    r.add_argument("board")
+    r.add_argument("-o", "--output")
+    r.add_argument("--rules")
+    r.add_argument("--classes", default="analog", help="net classes to route, in order (default: analog)")
+    r.add_argument("--nets", help="only these nets (comma-separated)")
+    r.add_argument("--layers", help="routing layers (default: copper layers except power planes)")
+    r.add_argument("--grid", type=float, default=0.25)
+    r.add_argument("--clearance", type=float, default=0.2)
+    r.add_argument("--no-lock", action="store_true", help="do not lock the new tracks")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(fn=cmd_route)
+    st = sub.add_parser("strip", help="remove tracks and vias")
+    st.add_argument("board")
+    st.add_argument("-o", "--output", required=True)
+    st.add_argument("--keep-locked", action="store_true")
+    st.set_defaults(fn=cmd_strip)
     g = sub.add_parser("ground", help="ground pours, fan-out vias and island repair")
     g.add_argument("board")
     g.add_argument("-o", "--output", help="write here instead of overwriting the board")

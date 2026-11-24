@@ -55,6 +55,7 @@ class Board:
     unrouted: int | None = None
     source: str = ""
     outline: list[list[tuple[float, float]]] = field(default_factory=list)   # board outline polygon(s)
+    plane_layers: list[str] = field(default_factory=list)   # inner layers mostly covered by one zone
 
     @property
     def nets(self) -> set[str]:

@@ -63,7 +63,20 @@ def from_pcbnew(kb, source: str = "") -> Board:
             continue
         for l in z.GetLayerSet().CuStack():
             zones.append((z.GetNetname(), kb.GetLayerName(l)))
-    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb))
+    # planes: inner layers whose type in the board setup is "power" (Board Setup > Layers)
+    planes = []
+    for l in kb.GetEnabledLayers().CuStack():
+        try:
+            if kb.GetLayerType(l) == pcbnew.LT_POWER and kb.GetLayerName(l) in copper[1:-1]:
+                planes.append(kb.GetLayerName(l))
+        except Exception:   # noqa: BLE001
+            pass
+    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes)
+
+
+def _area(poly) -> float:
+    n = len(poly)
+    return abs(sum(poly[i][0] * poly[(i + 1) % n][1] - poly[(i + 1) % n][0] * poly[i][1] for i in range(n))) / 2
 
 
 def _outline(kb) -> list[list[tuple[float, float]]]:
@@ -190,3 +203,43 @@ def apply_vias(kb, plans, net: str, via_d: float, drill: float, track_w: float) 
 
 def save(kb, path: str) -> None:
     pcbnew.SaveBoard(path, kb)
+
+
+def apply_routes(kb, routed, via_d: float, drill: float, lock: bool = True) -> tuple[int, int]:
+    """Write RoutedNet results (kar.router) to the board. Locked tracks are kept by Freerouting
+    (KiCad exports them as protected wiring)."""
+    nt = nv = 0
+    for r in routed:
+        n = kb.FindNet(r.net)
+        for s in r.segs:
+            t = pcbnew.PCB_TRACK(kb)
+            t.SetStart(pcbnew.VECTOR2I(_from_mm(s.x1), _from_mm(s.y1)))
+            t.SetEnd(pcbnew.VECTOR2I(_from_mm(s.x2), _from_mm(s.y2)))
+            t.SetWidth(_from_mm(s.width))
+            t.SetLayer(layer_id(kb, s.layer))
+            t.SetNet(n)
+            t.SetLocked(lock)
+            kb.Add(t)
+            nt += 1
+        for x, y in r.vias:
+            v = pcbnew.PCB_VIA(kb)
+            v.SetPosition(pcbnew.VECTOR2I(_from_mm(x), _from_mm(y)))
+            v.SetDrill(_from_mm(drill))
+            try:
+                v.SetWidth(pcbnew.F_Cu, _from_mm(via_d))
+            except TypeError:
+                v.SetWidth(_from_mm(via_d))
+            v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+            v.SetNet(n)
+            v.SetLocked(lock)
+            kb.Add(v)
+            nv += 1
+    return nt, nv
+
+
+def strip(kb, keep_locked: bool = False) -> int:
+    """Remove tracks and vias (for re-routing experiments)."""
+    gone = [t for t in kb.GetTracks() if not (keep_locked and t.IsLocked())]
+    for t in gone:
+        kb.Delete(t)
+    return len(gone)

@@ -111,6 +111,36 @@ def test_island_anchor_in_thermal_hole():
     assert not island_anchored(ring_cut, [(6.0, 1.5, 0.8)])
 
 
+def _route_board():
+    from kar.model import Board, Footprint, Pad
+
+    def pad(ref, num, net, x, y):
+        return Pad(ref, num, net, x, y, True, ("F.Cu",), bbox=(x - 0.5, y - 0.5, x + 0.5, y + 0.5))
+    j1 = Footprint("J1", "XLR", "Jack_XLR_Neutrik", [pad("J1", "2", "/IN_H", 5, 10), pad("J1", "3", "/IN_C", 5, 12)])
+    u1 = Footprint("U1", "OPA1612", "SOIC-8", [pad("U1", "3", "/IN_H", 35, 10), pad("U1", "2", "/IN_C", 35, 12)])
+    # a wall of foreign copper across the direct path on F.Cu, with a gap far below
+    wall = [Seg(20, 0.5, 20, 18, 0.5, "F.Cu", "/OTHER")]
+    sq = [(0, 0), (40, 0), (40, 30), (0, 30)]
+    return Board([j1, u1], wall, [], ["F.Cu", "B.Cu"], outline=[sq])
+
+
+def test_router_pair():
+    from kar.router import RouteParams, route
+    from kar.geometry import edge_gap
+    b = _route_board()
+    rules = R.load(None)
+    cls = classify(b, rules)
+    res = route(b, cls, RouteParams(layers=["F.Cu", "B.Cu"]), rules["activity_weight"], nets=["/IN_H", "/IN_C"])
+    assert res.failed == [] and {r.net for r in res.routed} == {"/IN_H", "/IN_C"}
+    segs = [s for r in res.routed for s in r.segs]
+    # no clearance violation against the wall on its layer
+    assert all(edge_gap(s, b.segs[0]) >= 0.2 - 1e-6 for s in segs if s.layer == "F.Cu")
+    # the pair runs side by side for most of its length
+    b.segs += segs
+    rep = build(b, classify(b, rules), rules).data
+    assert rep["pairs"]["items"][0]["parallel_pct"] > 60, rep["pairs"]["items"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
