@@ -5,6 +5,7 @@
   python -m kar route    BOARD.kicad_pcb [--classes analog,power,digital,other] [--nets A,B] [-o OUT]
   python -m kar finish   BOARD.kicad_pcb --jar freerouting.jar [--java java] [--passes 30] [-o OUT]
   python -m kar auto     BOARD.kicad_pcb -o OUT.kicad_pcb [--out DIR]   # route + ground + DRC + report
+  python -m kar bench    DIR [--out OUTDIR]          # strip + auto every board in DIR, compare with original
   python -m kar strip    BOARD.kicad_pcb -o OUT.kicad_pcb            # remove tracks/vias (experiments)
   python -m kar ground   BOARD.kicad_pcb [--net GND,/CHASSIS] [--pour F.Cu,B.Cu] [--max-dist 3] [-o OUT.kicad_pcb]
 
@@ -316,6 +317,52 @@ def cmd_auto(args) -> int:
     return 0 if ok else 2
 
 
+def cmd_bench(args) -> int:
+    """Re-route every *.kicad_pcb in a folder from scratch and compare with its original routing.
+    Boards are processed in parallel (one process each); originals are never modified."""
+    import glob
+    import subprocess
+    boards = sorted(glob.glob(os.path.join(args.dir, "*.kicad_pcb")))
+    outdir = args.out or os.path.join(args.dir, "kar_bench")
+    os.makedirs(outdir, exist_ok=True)
+    py = sys.executable
+    procs = []
+    for b in boards:
+        stem = os.path.splitext(os.path.basename(b))[0]
+        bare = os.path.join(outdir, stem + "_bare.kicad_pcb")
+        sh = (f'"{py}" -m kar report "{b}" --json > "{outdir}/{stem}_orig.json" 2>/dev/null; '
+              f'"{py}" -m kar strip "{b}" -o "{bare}" >/dev/null 2>&1; '
+              f'"{py}" -m kar auto "{bare}" -o "{outdir}/{stem}/{stem}.kicad_pcb" > "{outdir}/{stem}.log" 2>&1')
+        procs.append((stem, subprocess.Popen(sh, shell=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+        while sum(p.poll() is None for _, p in procs) >= args.jobs:
+            import time
+            time.sleep(2)
+    for _, p in procs:
+        p.wait()
+    import re
+    rows = []
+    for stem, _ in procs:
+        t = re.sub(r".*(swig|assert).*\n", "", open(os.path.join(outdir, stem + ".log"), encoding="utf-8").read())
+        i = t.rfind('{\n "saved"')
+        try:
+            s_ = json.loads(t[i:])
+            o = json.load(open(os.path.join(outdir, stem + "_orig.json")))
+        except Exception:   # noqa: BLE001
+            rows.append({"board": stem, "error": True})
+            continue
+        d = s_["drc"] or {}
+        rows.append({"board": stem, "original": o["score"], "kar": s_["score"], "seconds": s_["seconds"],
+                     "unconnected": d.get("unconnected"), "drc_problems": d.get("problems")})
+    print(json.dumps(rows, ensure_ascii=False, indent=1))
+    for r in rows:
+        if r.get("error"):
+            print(f"{r['board']:28s} ERROR (see log)", file=sys.stderr)
+        else:
+            print(f"{r['board']:28s} {r['original']:5.1f} -> {r['kar']:5.1f}  {r['seconds']:6.0f}s  "
+                  f"unconnected {r['unconnected']}  drc {r['drc_problems']}", file=sys.stderr)
+    return 0
+
+
 def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
@@ -378,6 +425,11 @@ def main(argv=None) -> int:
     a.add_argument("--clearance", type=float, default=0.2)
     a.add_argument("--no-lock", action="store_true")
     a.set_defaults(fn=cmd_auto)
+    bn = sub.add_parser("bench", help="re-route every board in a folder and compare with the original")
+    bn.add_argument("dir")
+    bn.add_argument("--out")
+    bn.add_argument("--jobs", type=int, default=4)
+    bn.set_defaults(fn=cmd_bench)
     st = sub.add_parser("strip", help="remove tracks and vias")
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)

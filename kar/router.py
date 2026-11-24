@@ -594,7 +594,8 @@ class _Search:
             cnt += 1
         heapq.heapify(heap)
         closed = bytearray(L * WH)
-        budget = prm.max_expand * (4 if push is not None else 1)   # pushing searches cross the board
+        # pushing searches cross the board; finer grids have more cells per mm
+        budget = int(prm.max_expand * (4 if push is not None else 1) * max(1.0, (0.25 / g.res) ** 2))
         pop, push_ = heapq.heappop, heapq.heappush
         found = -1
         while heap:
@@ -1049,8 +1050,9 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             continue
         pushes[net] = pushes.get(net, 0) + 1
         kind = cls.kind.get(net, "other")
+        # pushing a net means re-routing it: big nets (many pads) are dearer, analog dearer still
         id_cost = {g.nid(n): (prm.push_cost_analog if cls.kind.get(n) == "analog" else prm.push_cost)
-                   for n in done}
+                   * max(1.0, len(pads_by_net.get(n, [])) / 4.0) for n in done}
         pads = [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
         pf = _pair_band(g, done[partner_of[net]].segs, done[partner_of[net]].width, prm) \
             if partner_of.get(net) in done else None
@@ -1080,14 +1082,23 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
         p2.res, p2.fine_fallback, p2.rip_time_s = prm.res / 2, False, min(prm.rip_time_s, 120.0)
         if progress:
             progress(f"fine grid {p2.res} mm for {len(failed)} nets", True)
-        still = []
-        for net in failed:
+        def attempt_fine(nets_, phase_nets, done_, failed_):
+            """Route `nets_` on the fine grid; keep the result only if fewer nets end up unrouted."""
             p3 = copy.copy(p2)
-            p3.phase = _grid_phase(board, p2.res, {net})
-            r2 = route(board, cls, p3, weights, nets=[net], progress=progress, prerouted=dict(done))
-            done = {rn.net: rn for rn in r2.routed}
-            still += r2.failed
-        failed = sorted(set(still))
+            p3.phase = _grid_phase(board, p2.res, set(phase_nets))
+            r = route(board, cls, p3, weights, nets=list(nets_), progress=progress, prerouted=dict(done_))
+            new_done = {rn.net: rn for rn in r.routed}
+            lost = [n for n in done_ if n not in new_done]        # pushed aside and not rerouted
+            new_failed = sorted(set(r.failed) | set(lost) | (set(failed_) - set(nets_)))
+            if len(new_failed) < len(failed_):
+                return new_done, new_failed
+            return done_, failed_
+
+        # all failed nets together first (one fine grid, aligned to their pads) ...
+        done, failed = attempt_fine(failed, failed, done, failed)
+        # ... then one at a time, each with the grid on its own pads
+        for net in list(failed):
+            done, failed = attempt_fine([net], [net], done, failed)
     if prerouted is not None:
         return RouteResult(list(done.values()), failed, skipped)
     routed = [done[n] for n, _ in todo if n in done]
