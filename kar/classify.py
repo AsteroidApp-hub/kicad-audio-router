@@ -133,7 +133,7 @@ def classify(board: Board, rules: dict) -> Classification:
                             changed = True
     for n in nets:
         setk(n, "other", "-")
-    return Classification(kind, why, find_pairs(kind, rules), digital_activity(board, kind, rules))
+    return Classification(kind, why, find_pairs(kind, rules, board), digital_activity(board, kind, rules))
 
 
 def digital_activity(board: Board, kind: dict[str, str], rules: dict) -> dict[str, str]:
@@ -156,18 +156,36 @@ def digital_activity(board: Board, kind: dict[str, str], rules: dict) -> dict[st
     return out
 
 
-def find_pairs(kind: dict[str, str], rules: dict) -> list[tuple[str, str]]:
+def find_pairs(kind: dict[str, str], rules: dict, board: Board | None = None) -> list[tuple[str, str]]:
+    """Analog nets whose names differ only by a suffix / word pair. With a board, the two nets must also
+    connect to mostly the same kinds of parts (by type and value, at least half in common), otherwise they
+    cannot run together anyway (e.g. HOT also goes to a test clip far away)."""
+    from collections import Counter
     analog = {n for n, k in kind.items() if k == "analog"}
+    parts = {}
+    if board is not None:
+        fps = board.fp_by_ref()
+        for n, ps in board.pads_by_net().items():
+            # what the net connects to, as (part type, value) per part: mirror-image halves of a balanced
+            # circuit use different parts of the same kind and value
+            parts[n] = Counter((part_kind(fps[r]), fps[r].value) for r in {p.ref for p in ps})
+
+    def same_parts(a, b):
+        if board is None:
+            return True
+        pa, pb = parts.get(a, Counter()), parts.get(b, Counter())
+        union = sum((pa | pb).values())
+        return union > 0 and sum((pa & pb).values()) / union >= 0.5
     out = []
     for n in sorted(analog):
         for a, b in rules["diff_pairs"]:
             if n.endswith(a):
                 m = n[: len(n) - len(a)] + b
-                if m in analog and (n, m) not in out:
+                if m in analog and (n, m) not in out and same_parts(n, m):
                     out.append((n, m))
         for a, b in rules.get("diff_pairs_word", []):
             for mt in re.finditer(re.escape(a), n, re.I):
                 m = n[:mt.start()] + (b if n[mt.start()].isupper() else b.lower()) + n[mt.end():]
-                if m in analog and (n, m) not in out and (m, n) not in out:
+                if m in analog and (n, m) not in out and (m, n) not in out and same_parts(n, m):
                     out.append((n, m))
     return out

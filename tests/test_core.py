@@ -194,6 +194,23 @@ def test_route_overlapping_pads():
     assert res.failed == [], res.failed
 
 
+def test_pairs_need_matching_parts():
+    """HOT/COLD names alone are not enough: a pair must reach the same kinds of parts."""
+    from kar.classify import find_pairs
+    from kar.model import Board, Footprint, Pad
+
+    def fp(ref, val, *nets):
+        return Footprint(ref, val, "x", [Pad(ref, str(i + 1), n, 0, 0, True, ("F.Cu",)) for i, n in enumerate(nets)])
+    parts = [fp("J1", "XLR", "/A_HOT", "/A_COLD"), fp("R1", "10k", "/A_HOT", "/X"), fp("R2", "10k", "/A_COLD", "/Y"),
+             fp("J2", "XLR", "/B_HOT", "/B_COLD"), fp("SW1", "CLIP", "/B_HOT", "/Z"), fp("D1", "1N4148", "/B_COLD", "/W"),
+             fp("D2", "1N4148", "/B_COLD", "/V")]
+    b = Board(parts, [], [], ["F.Cu"])
+    kind = {n: "analog" for n in ("/A_HOT", "/A_COLD", "/B_HOT", "/B_COLD")}
+    pairs = find_pairs(kind, R.load(None), b)
+    assert ("/A_HOT", "/A_COLD") in pairs        # mirror-image halves: same kinds of parts
+    assert not any("/B_HOT" in p for p in pairs)  # HOT goes to a clip, COLD to diodes
+
+
 def test_drop_nets():
     from kar.freerouting import drop_nets
     dsn = """(pcb x (network
