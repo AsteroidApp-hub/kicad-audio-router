@@ -1,11 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "kicad-audio-router"
-version = "0.1.0.dev0"
-description = "Audio-aware routing helpers for KiCad: net classification, quality report, pre-routing, ground handling"
+version = "0.1.0"
+description = "Audio-aware autorouter and routing checks for KiCad: analog away from digital, balanced pairs side by side, a ground via for every ground pad"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
-dependencies = []   # pcbnew comes with KiCad; core modules are pure Python
+dependencies = []   # pcbnew comes with KiCad; everything else is the standard library
+keywords = ["kicad", "pcb", "autorouter", "audio", "routing", "eda"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Manufacturing",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+[project.urls]
+Homepage = "https://github.com/AsteroidApp-hub/kicad-audio-router"
+Issues = "https://github.com/AsteroidApp-hub/kicad-audio-router/issues"
+Changelog = "https://github.com/AsteroidApp-hub/kicad-audio-router/blob/main/CHANGELOG.md"
 
 [project.scripts]
 kar = "kar.cli:main"

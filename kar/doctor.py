@@ -79,14 +79,15 @@ def checks() -> list[dict]:
 
 
 def demo_run() -> dict:
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     py = sys.executable
-    subprocess.run([py, os.path.join(root, "examples", "make_demo.py")], cwd=root, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=pkg_parent + os.pathsep + os.environ.get("PYTHONPATH", ""))
     with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, "demo.kicad_pcb")
-        r = subprocess.run([py, "-m", "kar", "auto", os.path.join(root, "examples", "demo_receiver.kicad_pcb"),
-                            "-o", out], cwd=root, capture_output=True, text=True)
+        demo = os.path.join(d, "demo_receiver.kicad_pcb")
+        subprocess.run([py, "-c", f"from kar.demo import build; build({demo!r})"], check=True, env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        out = os.path.join(d, "routed", "demo.kicad_pcb")
+        r = subprocess.run([py, "-m", "kar", "auto", demo, "-o", out], capture_output=True, text=True, env=env)
         t = r.stdout
         i = t.rfind('{\n "saved"')
         if i < 0:
