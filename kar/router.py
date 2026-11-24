@@ -46,7 +46,7 @@ class RouteParams:
     near_mm: float = 3.0              # reach of the proximity cost fields
     near_cost: float = 3.0            # extra cost per step right next to the other kind (falls off linearly)
     pair_gap: float = 0.25            # target edge gap between the two sides of a pair
-    pair_cost: float = 0.6            # extra cost per step for the second side away from the first
+    pair_cost: float = 1.5            # extra cost per step for the second side away from the first
     window_mm: float = 12.0           # search window around the net, widened once on failure
     rip_rounds: int = 3               # rip-up and reroute rounds for nets that failed
     rip_radius: float = 2.0           # routed nets passing this close to a failed net's pads are ripped up
@@ -155,6 +155,25 @@ class Grid:
                 d = math.hypot(x1 + t * vx - x, y1 + t * vy - y)
                 if d < reach:
                     v = weight * (1.0 - d / reach)
+                    i = cy * W + cx
+                    if v > fld[i]:
+                        fld[i] = v
+
+    def field_ring(self, fld, x1, y1, x2, y2, centre, falloff, weight=1.0):
+        """Field that peaks at distance `centre` from the segment and falls to 0 at centre +- falloff."""
+        reach = centre + falloff
+        gx0, gy0 = self.cell(min(x1, x2) - reach, min(y1, y2) - reach)
+        gx1, gy1 = self.cell(max(x1, x2) + reach, max(y1, y2) + reach)
+        vx, vy = x2 - x1, y2 - y1
+        l2 = vx * vx + vy * vy
+        W, H = self.W, self.H
+        for cy in range(max(gy0, 0), min(gy1, H - 1) + 1):
+            for cx in range(max(gx0, 0), min(gx1, W - 1) + 1):
+                x, y = self.pos(cx, cy)
+                t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((x - x1) * vx + (y - y1) * vy) / l2))
+                d = math.hypot(x1 + t * vx - x, y1 + t * vy - y)
+                v = weight * (1.0 - abs(d - centre) / falloff)
+                if v > 0:
                     i = cy * W + cx
                     if v > fld[i]:
                         fld[i] = v
@@ -453,13 +472,15 @@ def _commit(g: Grid, net: str, kind: str, segs: list[Seg], vias, prm: RouteParam
 
 
 def _pair_band(g: Grid, segs: list[Seg], width: float, prm: RouteParams) -> list[array]:
-    """1.0 in the band where the second side of a pair should run, falling off outside."""
+    """1.0 on the line where the second side of a pair should run (one track pitch beside the first
+    side, on the same layer), falling to 0 within ~1 mm either side of it."""
     n = g.W * g.H
     out = [array("f", bytes(4 * n)) for _ in range(g.L)]
-    centre = width + prm.pair_gap        # centre-to-centre distance of the two sides
+    # nearest legal centre line: halo of the first side (clearance + margin) + both half widths
+    centre = width + prm.clearance + g.margin
     for s in segs:
         li = g.lidx[s.layer]
-        g.field_capsule(out[li], s.x1, s.y1, s.x2, s.y2, centre + 1.0, 1.0)
+        g.field_ring(out[li], s.x1, s.y1, s.x2, s.y2, centre, 1.0)
     return out
 
 
