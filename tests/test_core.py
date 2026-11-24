@@ -159,6 +159,20 @@ def test_uncommit_restores_grid():
     assert [bytes(x) for x in g.band] == band0
 
 
+def test_widen_power():
+    from kar.model import Board
+    from kar.router import RouteParams, RoutedNet, widen
+    sq = [(0, 0), (40, 0), (40, 30), (0, 30)]
+    b = Board([], [Seg(0.5, 20.5, 39.5, 20.5, 0.2, "F.Cu", "/SIG")], [], ["F.Cu", "B.Cu"], outline=[sq])
+    cls = classify(b, R.load(None))
+    cls.kind.update({"/+15V": "power", "/SIG": "digital"})
+    free = RoutedNet("/+15V", [Seg(5, 10, 35, 10, 0.3, "F.Cu", "/+15V")], [], 0.3)
+    tight = RoutedNet("/+15V", [Seg(5, 20, 35, 20, 0.3, "F.Cu", "/+15V")], [], 0.3)   # /SIG 0.5 mm away: no room
+    n = widen(b, [free, tight], cls, RouteParams())
+    assert free.segs[0].width == 0.5
+    assert tight.segs[0].width == 0.3 and n == 1
+
+
 def test_drop_nets():
     from kar.freerouting import drop_nets
     dsn = """(pcb x (network

@@ -39,7 +39,8 @@ class Report:
         p = d["pairs"]
         L += [f"| differential pairs | {len(p['items'])} (mismatch max {p['max_mismatch_mm']:.1f} mm, side-by-side {p['avg_parallel_pct']:.0f} %, away from pins {p['avg_parallel_away_pct']:.0f} %) |",
               f"| GND pads farther than {d['gnd']['limit_mm']} mm from a GND via | {len(d['gnd']['far'])} / {d['gnd']['pads']} |",
-              f"| power nets narrower than {d['power']['min_width_mm']} mm | {len(d['power']['narrow'])} |", ""]
+              f"| power nets narrower than {d['power']['min_width_mm']} mm | {len(d['power']['narrow'])} "
+              f"(neck-downs into fine-pitch pins not counted: {d['power'].get('neck_downs', 0)}) |", ""]
         worst = d["coupling"]["worst"][:15]
         if worst:
             L += ["## Analog nets closest to digital", "",
@@ -62,9 +63,9 @@ class Report:
                 L.append(f"| {f['pad']} | {f['dist_mm']:.1f} |")
             L.append("")
         if d["power"]["narrow"]:
-            L += ["## Narrow power tracks", "", "| net | narrowest |", "|---|---:|"]
+            L += ["## Narrow power tracks", "", "| net | narrowest | narrow length |", "|---|---:|---:|"]
             for f in d["power"]["narrow"]:
-                L.append(f"| {f['net']} | {f['min_width_mm']:.2f} |")
+                L.append(f"| {f['net']} | {f['min_width_mm']:.2f} | {f.get('length_mm', 0):.1f} mm |")
             L.append("")
         return "\n".join(L) + "\n"
 
@@ -162,12 +163,26 @@ def build(board: Board, cls: Classification, rules: dict) -> Report:
     gnd = {"limit_mm": m["gnd_via_max_mm"], "pads": npads, "far": far}
 
     # power width
-    narrow = []
+    # narrow power tracks; a narrow stretch within 1.5 mm of a pad of the same net that is narrower than a
+    # full-width power track is a neck-down into a fine-pitch pin (necessary), counted apart
+    narrow, neck = [], 0
+    lim = m["power_min_width_mm"]
+    pads_of = board.pads_by_net()
     for n in cls.nets_of("power"):
-        ws = [s.width for s in board.segs if s.net == n]
-        if ws and min(ws) < m["power_min_width_mm"] - 1e-6:
-            narrow.append({"net": n, "min_width_mm": min(ws)})
-    power = {"min_width_mm": m["power_min_width_mm"], "narrow": narrow}
+        full = m.get("power_full_width_mm", 0.5)
+        small = [p for p in pads_of.get(n, []) if min(p.box()[2] - p.box()[0], p.box()[3] - p.box()[1]) < full]
+        bad_w, bad_len = None, 0.0
+        for sg in board.segs:
+            if sg.net != n or sg.width >= lim - 1e-6:
+                continue
+            if any(min(p.dist(sg.x1, sg.y1), p.dist(sg.x2, sg.y2)) < 1.5 for p in small):
+                neck += 1
+                continue
+            bad_w = sg.width if bad_w is None else min(bad_w, sg.width)
+            bad_len += sg.length
+        if bad_w is not None:
+            narrow.append({"net": n, "min_width_mm": bad_w, "length_mm": round(bad_len, 1)})
+    power = {"min_width_mm": lim, "narrow": narrow, "neck_downs": neck}
 
     summary = {k: len(cls.nets_of(k)) for k in ("analog", "digital", "power", "gnd", "other")}
     summary["analog_length_mm"] = sum(alen.values())

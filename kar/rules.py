@@ -53,7 +53,8 @@ DEFAULTS: dict = {
     # parts whose outputs switch rarely (relay drivers, shift registers that set relays)
     "static_parts": [r"^ULN", r"^TPIC", r"^MIC2981", r"^TBD62"],
     "activity_weight": {"clock": 1.0, "data": 0.6, "static": 0.15},
-    "metrics": {"coupling_gap_mm": [1.0, 3.0], "gnd_via_max_mm": 3.0, "power_min_width_mm": 0.4},
+    "metrics": {"coupling_gap_mm": [1.0, 3.0], "gnd_via_max_mm": 3.0, "power_min_width_mm": 0.4,
+                "power_full_width_mm": 0.5},
 }
 
 KINDS = ("gnd", "power", "digital", "analog", "other", "ignore")

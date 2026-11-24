@@ -187,6 +187,8 @@ def cmd_route(args) -> int:
         if not args.json:
             print(f"  {'ok  ' if ok else 'FAIL'} {net}  ({time.time() - t0:.0f}s)", file=sys.stderr)
     res = route(board, cls, prm, rules["activity_weight"], nets, prog)
+    from .router import widen
+    res.stats["widened"] = widen(board, res.routed, cls, prm)
     nt, nv = kicad_io.apply_routes(kb, res.routed, prm.via_d, prm.via_drill, lock=not args.no_lock)
     kicad_io.refill(kb)
     out = args.output or args.board

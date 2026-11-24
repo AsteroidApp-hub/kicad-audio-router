@@ -1354,3 +1354,87 @@ def escape_to_via(board: Board, cls: Classification, prm: RouteParams, weights: 
         _commit(g, net, "gnd", rn.segs, rn.vias, prm)
         out.append(rn)
     return out, failed
+
+
+def widen(board: Board, routes: list[RoutedNet], cls: Classification, prm: RouteParams,
+          kinds=("power", "gnd")) -> int:
+    """After routing: tracks of power/ground nets that had to go narrow are widened back where the
+    copper around allows it (checked against real shapes, clearances per net class). Returns the
+    number of segments widened. Routes are updated in place."""
+    from .geometry import SegIndex, point_seg_dist, seg_seg_dist
+    from .geometry import point_in_poly, point_poly_dist
+    all_segs = list(board.segs) + [s for r in routes for s in r.segs]
+    idx = SegIndex(all_segs, cell=2.0)
+    vias = [(v.x, v.y, v.diameter / 2, v.net) for v in board.vias] + \
+           [(x, y, prm.via_d / 2, r.net) for r in routes for x, y in r.vias]
+    pads = [p for fp in board.footprints for p in fp.pads]
+    count = 0
+
+    def fits(s: Seg, w: float) -> bool:
+        hw = w / 2
+        bb = s.bbox(hw + 1.0)
+        for layer_seg in idx.near(s.layer, bb):
+            if layer_seg.net == s.net or layer_seg is s:
+                continue
+            c = board.clearance(s.net, layer_seg.net, default=prm.clearance)
+            if seg_seg_dist(s, layer_seg) - layer_seg.width / 2 - hw < c + 0.005:
+                return False
+        for x, y, r, n in vias:
+            if n != s.net and bb[0] - r <= x <= bb[2] + r and bb[1] - r <= y <= bb[3] + r:
+                c = board.clearance(s.net, n, default=prm.clearance)
+                if point_seg_dist(x, y, s.x1, s.y1, s.x2, s.y2) - r - hw < c + 0.005:
+                    return False
+        steps = max(2, int(s.length / 0.1))
+        near_pads = [p for p in pads if p.net != s.net and s.layer in p.layers
+                     and p.box()[0] <= bb[2] and p.box()[2] >= bb[0] and p.box()[1] <= bb[3] and p.box()[3] >= bb[1]]
+        for p in near_pads:
+            c = board.clearance(s.net, p.net, default=prm.clearance)
+            for k in range(steps + 1):
+                t = k / steps
+                if p.dist(s.x1 + t * (s.x2 - s.x1), s.y1 + t * (s.y2 - s.y1)) - hw < c + 0.005:
+                    return False
+        if board.outline:
+            for k in range(steps + 1):
+                t = k / steps
+                px, py = s.x1 + t * (s.x2 - s.x1), s.y1 + t * (s.y2 - s.y1)
+                if not any(point_in_poly(px, py, poly) for poly in board.outline) or \
+                        min(point_poly_dist(px, py, poly) for poly in board.outline) < prm.edge_clearance + hw:
+                    return False
+        for ko in board.keepouts:
+            if ko.get("no_tracks") and s.layer in ko["layers"]:
+                for k in range(steps + 1):
+                    t = k / steps
+                    px, py = s.x1 + t * (s.x2 - s.x1), s.y1 + t * (s.y2 - s.y1)
+                    if point_in_poly(px, py, ko["poly"]) or point_poly_dist(px, py, ko["poly"]) < hw:
+                        return False
+        return True
+
+    for r in routes:
+        kind = cls.kind.get(r.net, "other")
+        if kind not in kinds:
+            continue
+        full = prm.width.get(kind, 0.25)
+        targets = [full] + [w for w in (0.4,) if w < full]
+        new = []
+        for s in r.segs:
+            if s.width >= full - 1e-9:
+                new.append(s)
+                continue
+            for w in targets:
+                if w <= s.width + 1e-9:
+                    break
+                if fits(s, w):
+                    ns = Seg(s.x1, s.y1, s.x2, s.y2, w, s.layer, s.net)
+                    # the index holds the old segment: swap it for the wider one
+                    for key in idx._cells(s.layer, s.bbox()):
+                        lst = idx.grid.get(key)
+                        if lst and s in lst:
+                            lst.remove(s)
+                    for key in idx._cells(ns.layer, ns.bbox()):
+                        idx.grid[key].append(ns)
+                    s = ns
+                    count += 1
+                    break
+            new.append(s)
+        r.segs = new
+    return count
