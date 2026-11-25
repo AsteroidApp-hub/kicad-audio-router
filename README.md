@@ -35,13 +35,28 @@ The score is from `kar report` (0–100, higher is better; see [What the report 
 | monitor controller (~270 parts, relays, MUSES72320) | 4 | 52.4 | 85.9 | 143 s |
 | VU meter (USB-C) | 2 | 75.7 | 94.1 | 24 s |
 | tape saturator | 4 | 81.1 | 91.0 | 59 s |
-| P48 phantom supply | 4 | 82.5 | 85.0 | 23 s |
-| 2-ch mic preamp (discrete) | 4 | 79.6 | 82.5 | 28 s |
-| mic preamp (op-amp) | 2 | 78.5 | 86.0 | 81 s |
+| P48 phantom supply | 4 | 82.5 | 83.2 | 23 s |
+| 2-ch mic preamp (discrete) | 4 | 79.6 | 81.7 | 28 s |
+| mic preamp (op-amp) | 2 | 78.0 | 85.1 | 81 s |
 | phantom power unit | 2 | 99.3 | 100.0 | 8 s |
 
-Every board was fully routed. kar introduced no DRC problems; the only ones left (overlapping courtyards,
-pads of one footprint too close together) were already in the original boards.
+Eight more boards by other designers, taken from public GitHub projects and routed the same way
+(tested locally only; the boards are not part of this repository):
+
+| board | layers | original | kar | time |
+|---|---|---|---|---|
+| PCM1792A DAC (I2S in, analog out) | 2 | 55.0 | 86.7 | 40 s |
+| 4-channel eurorack mixer | 2 | 63.1 | 93.5 | 7 s |
+| NE5532 preamp (unrouted original) | 2 | 45.0 | 99.4 | 8 s |
+| THAT1512 microphone | 2 | 89.1 | 99.1 | 9 s |
+| power amplifier preamp | 2 | 90.0 | 99.8 | 8 s |
+| NE5532 headphone amplifier | 2 | 98.4 | 100.0 | 9 s |
+| tone control | 2 | 99.7 | 100.0 | 5 s |
+| RIAA phono preamp | 2 | 100.0 | 100.0 | 6 s |
+
+All fifteen boards were fully routed. kar introduced no DRC problems, at any severity; the only ones left
+(overlapping courtyards and footprints, pads of one footprint too close together, an open board outline)
+were already in the original boards, and kar's routing has fewer of them than the originals.
 
 ## Installation
 
@@ -58,6 +73,10 @@ $KPY -m kar doctor --demo           # checks your KiCad and routes the demo boar
 ```
 
 Without pip, clone the repository and run `$KPY -m kar ...` from its folder.
+
+To get a button in KiCad's PCB editor toolbar, run `$KPY -m kar plugin install` and restart KiCad. The button
+saves the board, routes a copy and writes it next to it as `<board>_kar.kicad_pcb` (the open board is not
+changed), then shows the score and the DRC result. `$KPY -m kar plugin remove` takes it out again.
 
 ## Quick start
 

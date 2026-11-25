@@ -27,8 +27,11 @@ First public version.
 - Route log: per-net table and every step that needed more than a plain route.
 - kar's copper grouped in KiCad by kind (`kar: analog`, `kar: power`, …).
 - `kar plot` (SVG), `kar bench` (re-route a folder of boards and compare), `kar doctor` (KiCad checks).
+- KiCad toolbar button (action plugin), installed with `kar plugin install`.
 
 ### Tested
+- Eight public boards by other designers (DAC, eurorack mixer, preamps, phantom-powered microphone,
+  phono and headphone amplifiers): all fully routed, no DRC problems introduced by kar at any severity.
 - KiCad 10.0 on macOS: seven real audio boards and the demo board, all fully routed, no DRC problems
   introduced by kar.
 - KiCad 9.0.9 on Linux (official Docker image): API checks, the demo board and the end-to-end tests pass
