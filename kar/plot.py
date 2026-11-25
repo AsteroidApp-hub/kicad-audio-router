@@ -24,7 +24,7 @@ def svg(board: Board, cls: Classification, layers: list[str] | None = None, scal
     total_h = h + head + 8
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w * scale:.0f}" height="{total_h * scale:.0f}" '
            f'viewBox="0 0 {total_w:.2f} {total_h:.2f}" font-family="sans-serif">',
-           f'<rect width="100%" height="100%" fill="#ffffff"/>']
+           f'<rect x="0" y="0" width="{total_w:.2f}" height="{total_h:.2f}" fill="#ffffff"/>']
     if title:
         out.append(f'<text x="0.5" y="3.2" font-size="3">{escape(title)}</text>')
     for k, layer in enumerate(layers):
