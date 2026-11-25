@@ -228,6 +228,24 @@ def test_connected_groups():
     assert sizes == [(1, 0, 0), (2, 2, 1)], sizes
 
 
+def test_classify_converters_regulators_eurorack():
+    from kar.model import Board, Footprint, Pad
+
+    def fp(ref, val, name, *nets):
+        return Footprint(ref, val, name, [Pad(ref, str(i + 1), n, 0, 0, True, ("F.Cu",)) for i, n in enumerate(nets)])
+    b = Board([fp("U1", "PCM1792A", "SSOP-28", "BCK", "LRCK", "DATAIN", "/IOUTL"),
+               fp("U2", "L7815", "TO-220", "/VIN", "GNDREF", "/V15"),
+               fp("J1", "In1", "PJ-301-M-12", "/J1_T", "GNDREF"),
+               fp("J2", "+20", "Pin_d1.0mm", "/VIN"),
+               fp("R1", "100k", "R_0805", "/J1_T", "/MIX")], [], [], ["F.Cu"])
+    c = classify(b, R.load(None))
+    k = c.kind
+    assert k["BCK"] == "digital" and c.activity["BCK"] == "clock" and k["DATAIN"] == "digital"
+    assert k["/IOUTL"] == "analog"                          # converter output
+    assert k["/VIN"] == "power" and k["/V15"] == "power" and k["GNDREF"] == "gnd"
+    assert k["/J1_T"] == "analog" and k["/MIX"] == "analog"  # eurorack jack, spread through R1
+
+
 def test_drop_nets():
     from kar.freerouting import drop_nets
     dsn = """(pcb x (network

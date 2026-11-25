@@ -79,6 +79,17 @@ def classify(board: Board, rules: dict) -> Classification:
     for n in nets:
         if _any(rules["power_names"], n):
             setk(n, "power", "name")
+    # supply by what the net touches: regulator / DC-DC pins, supply connectors (value like "+20", "16VAC")
+    for n in nets:
+        for p in pads.get(n, []):
+            fp = fps[p.ref]
+            pk = part_kind(fp)
+            if pk == "U" and _any(rules.get("power_parts", []), fp.value):
+                setk(n, "power", f"{fp.ref} {fp.value}")
+                break
+            if pk in ("J", "K") and _any(rules.get("power_connectors", []), fp.value):
+                setk(n, "power", f"{fp.ref} {fp.value}")
+                break
     # 3. digital
     for n in nets:
         if _any(rules["digital_names"], n.lstrip("/")):
