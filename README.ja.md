@@ -139,7 +139,7 @@ pip が使えないときは、リポジトリを手元に置き、そのフォ�
 - 線は 45 度刻みの直線だけで、円弧やティアドロップは使わない
 - 部品は動かさない。ベタは GND のビアと島の修理のほかは手を加えない
 - Python で動くので、約 270 部品の混んだ 4 層基板では数分かかる
-- 確かめたのは macOS の KiCad 10 だけ。KiCad 9、Windows、Linux でも動く見込みで、CI で確かめる ([docs/compatibility.md](docs/compatibility.md))。結果を知らせてもらえると助かる
+- 確かめたのは KiCad 10 (macOS) と KiCad 9 (Linux、KiCad 公式の Docker イメージ)。Windows でも動く見込みだが、まだ試していない ([docs/compatibility.md](docs/compatibility.md))。結果を知らせてもらえると助かる
 
 ## 開発に参加する
 

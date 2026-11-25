@@ -109,6 +109,6 @@ def build(out: str) -> str:
     z.SetLocalClearance(mm(0.3))
     z.SetMinThickness(mm(0.25))
     b.Add(z)
-    pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+    # the zone is left unfilled: filling a board built in memory crashes KiCad 9, and kar refills anyway
     pcbnew.SaveBoard(out, b)
     return out

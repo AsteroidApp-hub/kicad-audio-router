@@ -175,8 +175,8 @@ recognised. Check the result with `kar classify` and override anything with a ru
 - Tracks are straight segments at 45° steps; no arcs or teardrops.
 - kar does not move parts or shape copper pours beyond ground vias and island repair.
 - It is Python: a dense 4-layer board with ~270 parts takes a few minutes.
-- Tested on KiCad 10 on macOS. KiCad 9, Windows and Linux are expected to work and are checked in CI
-  ([docs/compatibility.md](docs/compatibility.md)); please report what you find.
+- Tested on KiCad 10 (macOS) and KiCad 9 (Linux, official Docker image). Windows is expected to work but
+  has not been tried yet ([docs/compatibility.md](docs/compatibility.md)); please report what you find.
 
 ## Contributing
 

@@ -30,4 +30,6 @@ First public version.
 
 ### Tested
 - KiCad 10.0 on macOS: seven real audio boards and the demo board, all fully routed, no DRC problems
-  introduced by kar. KiCad 9.0 and 10.0 in CI (Docker images) once published.
+  introduced by kar.
+- KiCad 9.0.9 on Linux (official Docker image): API checks, the demo board and the end-to-end tests pass
+  with the same result.
