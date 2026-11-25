@@ -19,7 +19,7 @@ $KPY tests/test_kicad.py          # builds and routes the demo board, re-route a
 $KPY -m kar bench path/to/boards  # re-route a folder of boards and compare with their routing
 ```
 
-- Only `kar/kicad_io.py`, `kar/doctor.py` and `kar/demo.py` import `pcbnew`; keep the rest pure Python so
+- Only `kar/kicad_io.py`, `kar/doctor.py`, `kar/demo.py` and `kar/kicad_plugin/` import `pcbnew`; keep the rest pure Python so
   it can be tested without KiCad.
 - Results must stay deterministic: the same board and rules give the same output.
 - A change to the router should come with a `kar bench` run on a few boards: no new unconnected items, no

@@ -283,7 +283,7 @@ def run_drc(board: str, out_json: str) -> dict | None:
     cli = _kicad_cli()
     if not cli:
         return None
-    subprocess.run([cli, "pcb", "drc", "--severity-error", "--format", "json", "-o", out_json, board],
+    subprocess.run([cli, "pcb", "drc", "--severity-all", "--format", "json", "-o", out_json, board],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with open(out_json, encoding="utf-8") as f:
         d = json.load(f)
@@ -411,6 +411,37 @@ def cmd_doctor(args) -> int:
     return doctor_main(args.demo, args.json)
 
 
+def cmd_plugin(args) -> int:
+    """Install / remove the KiCad toolbar button (action plugin)."""
+    import glob
+    import shutil
+    base = args.dir
+    if not base:
+        home = os.path.expanduser("~")
+        cands = sorted(glob.glob(os.path.join(home, "Documents", "KiCad", "*", "scripting", "plugins")) +
+                       glob.glob(os.path.join(home, ".local", "share", "kicad", "*", "scripting", "plugins")) +
+                       glob.glob(os.path.join(home, "Documents", "KiCad", "*")))
+        cands = [c if c.endswith("plugins") else os.path.join(c, "scripting", "plugins") for c in cands]
+        base = cands[-1] if cands else None
+    if not base:
+        raise SystemExit("KiCad plugin folder not found: pass --dir")
+    dst = os.path.join(base, "kicad_audio_router")
+    if args.action == "remove":
+        shutil.rmtree(dst, ignore_errors=True)
+        print(json.dumps({"removed": dst}))
+        return 0
+    os.makedirs(base, exist_ok=True)
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kicad_plugin")
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
+    # where kar lives, so the button works without pip, and which Python to run it with
+    with open(os.path.join(dst, "kar_location.json"), "w", encoding="utf-8") as f:
+        json.dump({"pythonpath": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   "python": sys.executable}, f, indent=1)
+    print(json.dumps({"installed": dst, "next": "restart KiCad (or Tools > External Plugins > Refresh Plugins)"}))
+    return 0
+
+
 def cmd_strip(args) -> int:
     from . import kicad_io
     _, kb = kicad_io.load(args.board)
@@ -500,6 +531,10 @@ def main(argv=None) -> int:
     dr.add_argument("--demo", action="store_true", help="also build and route the demo board")
     dr.add_argument("--json", action="store_true")
     dr.set_defaults(fn=cmd_doctor)
+    pg = sub.add_parser("plugin", help="install the KiCad toolbar button (action plugin)")
+    pg.add_argument("action", choices=["install", "remove"])
+    pg.add_argument("--dir", help="KiCad scripting/plugins folder (default: found under your Documents)")
+    pg.set_defaults(fn=cmd_plugin)
     st = sub.add_parser("strip", help="remove tracks and vias")
     st.add_argument("board")
     st.add_argument("-o", "--output", required=True)

@@ -29,4 +29,7 @@ Changelog = "https://github.com/AsteroidApp-hub/kicad-audio-router/blob/main/CHA
 kar = "kar.cli:main"
 
 [tool.setuptools]
-packages = ["kar"]
+packages = ["kar", "kar.kicad_plugin"]
+
+[tool.setuptools.package-data]
+"kar.kicad_plugin" = ["icon.png"]

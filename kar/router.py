@@ -1027,7 +1027,14 @@ def route_net(g: Grid, board_pads: list, net: str, kind: str, width, prm: RouteP
         hit = remaining[targets[path[-1]]]
         tree.update(hit.cells)
         remaining.remove(hit)
-    return RoutedNet(net, all_segs, all_vias, widths[0])
+    # one via per spot: a later connection may change layer where an earlier one already put a via
+    seen, uniq = set(), []
+    for x, y in all_vias:
+        k = (round(x, 3), round(y, 3))
+        if k not in seen:
+            seen.add(k)
+            uniq.append((x, y))
+    return RoutedNet(net, all_segs, uniq, widths[0])
 
 
 def _crossed(new: RoutedNet, done: dict[str, RoutedNet], prm: RouteParams) -> list[str]:
