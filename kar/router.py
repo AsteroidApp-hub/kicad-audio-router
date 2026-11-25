@@ -22,7 +22,7 @@ from array import array
 from dataclasses import dataclass, field
 
 from .classify import Classification
-from .geometry import Seg
+from .geometry import Seg, point_seg_dist
 from .model import Board, Pad
 
 BLOCK = 0xFFFF
@@ -921,7 +921,29 @@ class Terminal:
         return Terminal((p.ref, p.number, p.x, p.y), _pad_cells(g, p), p.x, p.y)
 
     @staticmethod
-    def of_group(g: "Grid", grp: dict) -> "Terminal":
+    def of_group(g: "Grid", grp: dict, ends_only: bool = False) -> "Terminal":
+        """`ends_only`: if the group has track ends that touch nothing (a stub drawn by hand towards
+        somewhere), only the cells at those ends; the route then continues the stub instead of leaving
+        it dangling. Groups without such ends are unaffected."""
+        if ends_only:
+            ends = _open_ends(grp)
+            if ends:
+                cells = set()
+                for sg, (ex, ey) in ends:
+                    if sg.layer not in g.lidx:
+                        continue
+                    li = g.lidx[sg.layer]
+                    ox, oy = (sg.x2, sg.y2) if (ex, ey) == (sg.x1, sg.y1) else (sg.x1, sg.y1)
+                    span = min(sg.length, g.res * 1.5)
+                    n = max(1, int(span / (g.res / 2)))
+                    for k in range(n + 1):
+                        t = (k / n) * span / max(sg.length, 1e-9)
+                        cx, cy = g.cell(ex + t * (ox - ex), ey + t * (oy - ey))
+                        if 0 <= cx < g.W and 0 <= cy < g.H:
+                            cells.add((li, cx, cy))
+                if cells:
+                    full = Terminal.of_group(g, grp)
+                    return Terminal(full.key, cells, full.x, full.y)
         cells: set = set()
         for p in grp["pads"]:
             cells |= _pad_cells(g, p)
@@ -949,6 +971,44 @@ class Terminal:
             v = grp["vias"][0]
             key, x, y = ("~", "", v.x, v.y), v.x, v.y
         return Terminal(key, cells, x, y)
+
+
+def _open_ends(grp: dict) -> list:
+    """Track ends in a group of joined copper that touch no pad, via or other track of the group."""
+    from .connect import EPS
+    out = []
+    segs = grp["segs"]
+    for sg in segs:
+        for ex, ey in ((sg.x1, sg.y1), (sg.x2, sg.y2)):
+            r = sg.width / 2
+            if any(sg.layer in p.layers and p.dist(ex, ey) <= r + EPS for p in grp["pads"]):
+                continue
+            if any(((v.x - ex) ** 2 + (v.y - ey) ** 2) ** 0.5 <= v.diameter / 2 + r + EPS for v in grp["vias"]):
+                continue
+            if any(o is not sg and o.layer == sg.layer and
+                   point_seg_dist(ex, ey, o.x1, o.y1, o.x2, o.y2) <= (o.width + sg.width) / 2 + EPS for o in segs):
+                continue
+            out.append((sg, (ex, ey)))
+    return out
+
+
+def _close_ends(res: "RoutedNet", ends: list, reach: float) -> None:
+    """A route that stops on a stub a little short of its open end (grid cells are not on the end
+    point) gets a short piece along the stub to the end itself, so the stub does not dangle."""
+    for sg, (ex, ey) in ends:
+        best = None
+        for s in res.segs:
+            if s.layer != sg.layer:
+                continue
+            for px, py in ((s.x1, s.y1), (s.x2, s.y2)):
+                d = ((px - ex) ** 2 + (py - ey) ** 2) ** 0.5
+                # only along the stub itself (the piece then lies on copper that is there anyway)
+                if 1e-6 < d <= reach and point_seg_dist(px, py, sg.x1, sg.y1, sg.x2, sg.y2) <= sg.width / 2 and \
+                        (best is None or d < best[0]):
+                    best = (d, px, py, s.width)
+        if best:
+            _, px, py, w = best
+            res.segs.append(Seg(px, py, ex, ey, min(w, sg.width), sg.layer, res.net))
 
 
 def route_net(g: Grid, board_pads: list, net: str, kind: str, width, prm: RouteParams,
@@ -1117,21 +1177,29 @@ def route(board: Board, cls: Classification, prm: RouteParams, weights: dict, ne
             _commit(g, n, cls.kind.get(n, "other"), rn.segs, rn.vias, prm, fields=False, fixed=True)
             frozen[n] = rn
 
-    def terms(g, net):
+    def terms(g, net, ends_only=False):
         """What to connect: the net's pads, or, for a net that is partly routed already, the groups of
-        copper that are joined so far."""
+        copper that are joined so far (`ends_only`: from the open ends of hand-drawn stubs)."""
         if net in partial:
-            return [Terminal.of_group(g, grp) for grp in partial[net]]
+            return [Terminal.of_group(g, grp, ends_only) for grp in partial[net]]
         return [p for p in pads_by_net.get(net, []) if any(l in g.lidx for l in p.layers)]
 
     def attempt(g, net, partner, first_of_pair=False):
         kind = cls.kind.get(net, "other")
-        pads = terms(g, net)
         widths = prm.widths_for(net, kind)
         pf = _pair_band(g, done[partner].segs, done[partner].width, prm) if partner in done else None
         why: list = []
-        res = route_net(g, pads, net, kind, widths, prm, pf, weights.get(cls.activity.get(net, "data"), 1.0),
-                        first_of_pair=first_of_pair, why=why)
+        res = None
+        ends = [e for grp in partial.get(net, []) for e in _open_ends(grp)]
+        if ends:
+            # continue hand-drawn stubs from their open ends first; any part of the copper otherwise
+            res = route_net(g, terms(g, net, True), net, kind, widths, prm, pf,
+                            weights.get(cls.activity.get(net, "data"), 1.0), first_of_pair=first_of_pair)
+            if res:
+                _close_ends(res, ends, g.res * 2)
+        if res is None:
+            res = route_net(g, terms(g, net), net, kind, widths, prm, pf,
+                            weights.get(cls.activity.get(net, "data"), 1.0), first_of_pair=first_of_pair, why=why)
         if why:
             pin_bound.add(net)
         if res:

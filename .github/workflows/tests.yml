@@ -3,15 +3,15 @@ on: [push, pull_request]
 jobs:
   core:
     # pure-Python parts, no KiCad needed
+    # (in the official Python images: hosted runners no longer offer every version)
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ["3.9", "3.11", "3.12"]
+        python: ["3.9", "3.11", "3.12", "3.13"]
+    container:
+      image: python:${{ matrix.python }}-slim
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
+      - uses: actions/checkout@v5
       - run: python tests/test_core.py
 
   kicad:
@@ -25,6 +25,6 @@ jobs:
       image: kicad/kicad:${{ matrix.kicad }}
       options: --user root
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: python3 -m kar doctor --demo
       - run: python3 tests/test_kicad.py

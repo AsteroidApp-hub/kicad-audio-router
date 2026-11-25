@@ -18,7 +18,8 @@ First public version.
   are routed again at full width by pushing other routes aside (kept only if every pushed route fits).
 - Net classes from the project file: track width and via size per class.
 - Re-routing after hand edits: `--rip-kar` removes only what kar placed (PCB groups `kar: ...`) and
-  completes nets that are partly routed.
+  completes nets that are partly routed; a track drawn by hand that ends in the open is continued from
+  its end, so it is not left dangling.
 
 ### Checks and output
 - Net classification (analog / digital / power / ground / other, balanced pairs) with reasons;
