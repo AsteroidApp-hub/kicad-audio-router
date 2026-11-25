@@ -87,7 +87,8 @@ def classify(board: Board, rules: dict) -> Classification:
             if pk == "U" and _any(rules.get("power_parts", []), fp.value):
                 setk(n, "power", f"{fp.ref} {fp.value}")
                 break
-            if pk in ("J", "K") and _any(rules.get("power_connectors", []), fp.value):
+            # a supply connector has few pins (a USB-C receptacle with CC/data pins is not one)
+            if pk in ("J", "K") and len(fp.pads) <= 4 and _any(rules.get("power_connectors", []), fp.value):
                 setk(n, "power", f"{fp.ref} {fp.value}")
                 break
     # 3. digital

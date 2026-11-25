@@ -1475,6 +1475,10 @@ def escape_to_via(board: Board, cls: Classification, prm: RouteParams, weights: 
     g = build_grid(board, cls, prm, weights)
     pads = {f"{p.ref}.{p.number}": p for fp in board.footprints for p in fp.pads}
     out, failed = [], []
+    # a via is only worth placing where it lands on the net's plane or on a pour of it in another layer
+    from .geometry import point_in_poly
+    land = [(l, pl) for n, l, pl in getattr(board, "zone_polys", []) if n == net]
+    has_plane = any(n == net and l in board.plane_layers for n, l in board.zones)
     for name in pad_names:
         p = pads.get(name)
         if p is None or not any(l in g.lidx for l in p.layers):
@@ -1500,7 +1504,8 @@ def escape_to_via(board: Board, cls: Classification, prm: RouteParams, weights: 
             _, cx, cy = cur
             # a via site: clear of everything fixed (not on any pad), and legal on all layers
             if cur not in start and fixed[cy * g.W + cx] == 0 and srch.via_ok(cx, cy) and \
-                    p.dist(*g.pos(cx, cy)) >= prm.via_d / 2 + 0.1:
+                    p.dist(*g.pos(cx, cy)) >= prm.via_d / 2 + 0.1 and \
+                    (has_plane or any(l != g.layers[li0] and point_in_poly(*g.pos(cx, cy), pl) for l, pl in land)):
                 best = cur
                 break
             if d > limit:

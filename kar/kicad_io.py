@@ -99,7 +99,7 @@ def from_pcbnew(kb, source: str = "") -> Board:
             a, b = t.GetStart(), t.GetEnd()
             segs.append(Seg(_mm(a.x), _mm(a.y), _mm(b.x), _mm(b.y), _mm(t.GetWidth()),
                             kb.GetLayerName(t.GetLayer()), t.GetNetname()))
-    zones, keepouts = [], []
+    zones, keepouts, zone_polys = [], [], []
     for z in kb.Zones():
         if z.GetIsRuleArea():
             o = z.Outline()
@@ -110,8 +110,13 @@ def from_pcbnew(kb, source: str = "") -> Board:
                                  "no_tracks": bool(z.GetDoNotAllowTracks()), "no_vias": bool(z.GetDoNotAllowVias()),
                                  "no_pads": bool(z.GetDoNotAllowPads())})
             continue
+        o = z.Outline()
+        polys = [[(_mm(o.Outline(i).CPoint(k).x), _mm(o.Outline(i).CPoint(k).y))
+                  for k in range(o.Outline(i).PointCount())] for i in range(o.OutlineCount())]
         for l in z.GetLayerSet().CuStack():
             zones.append((z.GetNetname(), kb.GetLayerName(l)))
+            for pl in polys:
+                zone_polys.append((z.GetNetname(), kb.GetLayerName(l), pl))
     # planes: inner layers whose type in the board setup is "power" (Board Setup > Layers)
     planes = []
     for l in kb.GetEnabledLayers().CuStack():
@@ -124,8 +129,10 @@ def from_pcbnew(kb, source: str = "") -> Board:
         hole_cl = _mm(kb.GetDesignSettings().m_HoleClearance)
     except Exception:   # noqa: BLE001
         hole_cl = 0.0
-    return Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes, ncl, keepouts,
-                 hole_cl)
+    b = Board(fps, segs, vias, copper, zones, _unrouted(kb), source, _outline(kb), planes, ncl, keepouts,
+              hole_cl)
+    b.zone_polys = zone_polys
+    return b
 
 
 def _area(poly) -> float:

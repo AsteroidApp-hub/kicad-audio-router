@@ -85,7 +85,7 @@ def _ground_board():
         Pad("C1", "2", "GND", 21.9, 20.0, True, ("F.Cu",), bbox=(21.4, 19.4, 22.4, 20.6))])
     # a signal track hugging the right of the GND pad on every layer would block the via; leave room below
     segs = [S(23.4, 15, 23.4, 25, "/SIG", layer=l) for l in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu")]
-    return Board([c1], segs, [], ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], outline=[sq])
+    return Board([c1], segs, [], ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"], zones=[("GND", "In1.Cu")], outline=[sq])
 
 
 def test_ground_fanout():
@@ -102,6 +102,10 @@ def test_ground_fanout():
     from kar.model import Via
     b.vias.append(Via(v.x, v.y, "GND", 0.6, 0.3))
     assert plan_fanout(b, GroundParams())[0] == []
+    # no ground plane or pour to land on: no via (it would dangle)
+    b2 = _ground_board()
+    b2.zones = []
+    assert plan_fanout(b2, GroundParams())[0] == []
 
 
 def test_island_anchor_in_thermal_hole():

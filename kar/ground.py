@@ -207,6 +207,12 @@ def plan_fanout(board: Board, prm: GroundParams, obst: Obstacles | None = None) 
     anchors = _anchors(board, prm.net)
     r = prm.via_d / 2
     plans, failed = [], []
+    # a via only helps if the net has copper to land on in another layer (plane or pour); otherwise it
+    # would dangle, and the net is better joined with tracks
+    zone_layers = {l for n, l in board.zones if n == prm.net} | set()
+    if not zone_layers:
+        return plans, failed
+    land = [(l, pl) for n, l, pl in getattr(board, "zone_polys", []) if n == prm.net]
     for fp in sorted(board.footprints, key=lambda f: f.ref):
         cx = sum(p.x for p in fp.pads) / max(len(fp.pads), 1)
         cy = sum(p.y for p in fp.pads) / max(len(fp.pads), 1)
@@ -216,6 +222,8 @@ def plan_fanout(board: Board, prm: GroundParams, obst: Obstacles | None = None) 
             if anchor_dist(p, anchors) <= prm.max_dist:
                 continue
             layer = p.layers[0] if p.layers else "F.Cu"
+            if not (zone_layers - {layer}):
+                continue                     # no plane or pour of this net in another layer
             out = math.atan2(p.y - cy, p.x - cx) if (p.x, p.y) != (cx, cy) else 0.0
             angs = sorted((2 * math.pi * k / prm.directions for k in range(prm.directions)),
                           key=lambda a: (abs(math.remainder(a - out, 2 * math.pi)), a))
@@ -230,6 +238,8 @@ def plan_fanout(board: Board, prm: GroundParams, obst: Obstacles | None = None) 
                         continue
                     if not obst.via_ok(x, y, r, prm.net, prm.clearance, p):
                         continue
+                    if land and not any(l != layer and _point_in_poly(x, y, pl) for l, pl in land):
+                        continue             # the via would not reach the net's plane or pour
                     if not obst.track_ok(p.x, p.y, x, y, prm.track_w, layer, prm.net, prm.clearance, p):
                         continue
                     done = ViaPlan(round(x, 4), round(y, 4), f"{p.ref}.{p.number}", (p.x, p.y, x, y, layer))
@@ -254,6 +264,8 @@ def plan_islands(board: Board, islands: list[list[tuple[float, float]]], prm: Gr
     circles = anchor_circles(board, prm.net)
     r = prm.via_d / 2
     plans, failed = [], 0
+    land = [(l, pl) for n, l, pl in getattr(board, "zone_polys", []) if n == prm.net]
+    planes = [l for l in board.plane_layers]
     for poly in islands:
         if island_anchored(poly, circles):
             continue
@@ -265,7 +277,8 @@ def plan_islands(board: Board, islands: list[list[tuple[float, float]]], prm: Gr
             while y <= max(ys):
                 if _point_in_poly(x, y, poly):
                     d = _poly_edge_dist(x, y, poly)
-                    if d >= r and (best is None or d > best[0]) and obst.via_ok(x, y, r, prm.net, prm.clearance):
+                    if d >= r and (best is None or d > best[0]) and obst.via_ok(x, y, r, prm.net, prm.clearance) \
+                            and (planes or not land or sum(1 for l, pl in land if _point_in_poly(x, y, pl)) >= 2):
                         best = (d, x, y)
                 y += grid
             x += grid

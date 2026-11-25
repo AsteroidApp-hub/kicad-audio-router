@@ -107,7 +107,7 @@ def cmd_ground(args) -> int:
             routes, failed = escape_to_via(model, classify(model, rules), RouteParams(clearance=prm.clearance,
                                            via_d=prm.via_d, via_drill=prm.via_drill), rules["activity_weight"],
                                            net, failed, width=prm.track_w)
-            kicad_io.apply_routes(kb, routes, prm.via_d, prm.via_drill, lock=False)
+            kicad_io.apply_routes(kb, routes, prm.via_d, prm.via_drill, lock=False, group_of=lambda n: "kar: ground")
             res["escape_vias"] = len(routes)
         res["fanout_failed"] = failed
         kicad_io.refill(kb)
@@ -131,7 +131,7 @@ def cmd_ground(args) -> int:
             routes, efail = escape_to_via(model, classify(model, rules), RouteParams(clearance=prm.clearance,
                                           via_d=prm.via_d, via_drill=prm.via_drill), rules["activity_weight"],
                                           net, names, width=prm.track_w)
-            kicad_io.apply_routes(kb, routes, prm.via_d, prm.via_drill, lock=False)
+            kicad_io.apply_routes(kb, routes, prm.via_d, prm.via_drill, lock=False, group_of=lambda n: "kar: ground")
             res["island_escapes"] = len(routes)
             res["islands_failed"] -= sum(1 for poly in stuck
                                          if any(n not in efail for n in pads_on_island(model, poly, net)))

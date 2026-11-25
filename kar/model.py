@@ -87,6 +87,7 @@ class Board:
     hole_clearance: float = 0.0      # board rule: copper to holes (used for pads without a net, e.g. NPTH)
     net_class: dict[str, str] = field(default_factory=dict)        # net -> net class name (project file)
     netclasses: dict[str, dict] = field(default_factory=dict)      # class -> {"track_width", "via_diameter", ...}
+    zone_polys: list = field(default_factory=list)   # (net, layer, outline polygon) of copper zones
 
     def class_of(self, net: str) -> dict | None:
         """The net's own net class settings, None for nets in the Default class (no explicit intent)."""
